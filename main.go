@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -9,6 +10,7 @@ import (
 	"go.uber.org/zap"
 	"os"
 	"os/signal"
+	"strconv"
 )
 
 var logger *zap.Logger
@@ -61,6 +63,7 @@ func main() {
 	}
 
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertSet", bot.MatchTypeExact, handlerAlertSet)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertList", bot.MatchTypeExact, handlerAlertList)
 
 	b.Start(ctx)
 }
@@ -79,6 +82,71 @@ func handlerAlertSet(ctx context.Context, b *bot.Bot, update *models.Update) {
 	b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: update.Message.Chat.ID,
 		Text:   p.Step[p.CurrentStepIndex].Message,
+	})
+}
+
+func handlerAlertList(ctx context.Context, b *bot.Bot, update *models.Update) {
+
+	var alerts []Alert
+	err := db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte("alert-" + strconv.FormatInt(update.Message.Chat.ID, 10))
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			var alert Alert
+			err := item.Value(func(val []byte) error {
+				return json.Unmarshal(val, &alert)
+			})
+			if err != nil {
+				return err
+			}
+			alerts = append(alerts, alert)
+		}
+		return nil
+	})
+	if err != nil {
+		sugar.Errorw("Failed to list alerts", "error", err)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "خطا در دریافت اعلان‌ها.",
+		})
+		return
+	}
+
+	if len(alerts) == 0 {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "هیچ اعلان فعالی وجود ندارد.",
+		})
+		return
+	}
+
+	var response string
+
+	for i, alert := range alerts {
+		response += strconv.Itoa(i+1) + ". " + alert.Title + " (هر" + strconv.Itoa(alert.Interval) + " ثانیه)"
+		if i != len(alerts)-1 {
+			response += "\n"
+		}
+	}
+
+	var inlineKeyboardButtons [][]models.InlineKeyboardButton
+	for _, alert := range alerts {
+		inlineKeyboardButtons = append(inlineKeyboardButtons, []models.InlineKeyboardButton{
+			{
+				Text:         "حذف " + alert.Title,
+				CallbackData: "delete_alert-" + strconv.FormatInt(alert.Id, 10),
+			},
+		})
+	}
+
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:      update.Message.Chat.ID,
+		Text:        response,
+		ReplyMarkup: &models.InlineKeyboardMarkup{InlineKeyboard: inlineKeyboardButtons},
 	})
 }
 

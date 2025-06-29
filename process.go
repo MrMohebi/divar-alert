@@ -64,9 +64,9 @@ func setAlertEmpty(chatId int64) Process {
 		Id: ProcessKey.SetAlert,
 		Step: []Step{
 			{
-				Name:    "name",
+				Name:    "title",
 				Data:    "",
-				Message: "لطفا نام اعلان را ارسال کنید:",
+				Message: "لطفا عنوان اعلان را ارسال کنید:",
 			},
 			{
 				Name:    "link",
@@ -74,7 +74,7 @@ func setAlertEmpty(chatId int64) Process {
 				Message: "لطفا لینک دیوار را ارسال کنید:",
 			},
 			{
-				Name:    "seconds",
+				Name:    "interval",
 				Data:    "",
 				Message: "هر چند ثانیه میخواهید چک شود؟",
 			},
@@ -101,8 +101,22 @@ func setAlertEmpty(chatId int64) Process {
 //	error: An error if the operation fails, otherwise nil.
 func setAlertOnComplete(p Process) error {
 	key := "alert-" + strconv.FormatInt(p.ChatId, 10)
+
+	interval, err := strconv.Atoi(p.Step[2].Data)
+	if err != nil {
+		return err
+	}
+
 	return db.Update(func(txn *badger.Txn) error {
-		value, err := json.Marshal(p)
+		alert := Alert{
+			Id:       time.Now().UnixNano(),
+			Title:    p.Step[0].Data,
+			Link:     p.Step[1].Data,
+			Interval: interval,
+			ChatId:   p.ChatId,
+		}
+
+		value, err := json.Marshal(alert)
 		if err != nil {
 			return err
 		}
