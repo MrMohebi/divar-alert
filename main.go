@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -55,6 +56,7 @@ func main() {
 	opts := []bot.Option{
 		bot.WithServerURL(TelegramApiUrl),
 		bot.WithDefaultHandler(handlerDefault),
+		bot.WithCallbackQueryDataHandler("delete_alert-", bot.MatchTypePrefix, handlerCallbackDeleteAlert),
 	}
 
 	b, err := bot.New(TelegramToken, opts...)
@@ -66,6 +68,45 @@ func main() {
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertList", bot.MatchTypeExact, handlerAlertList)
 
 	b.Start(ctx)
+}
+
+func handlerCallbackDeleteAlert(ctx context.Context, b *bot.Bot, update *models.Update) {
+	b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+		CallbackQueryID: update.CallbackQuery.ID,
+		ShowAlert:       false,
+	})
+
+	alertIdStr := update.CallbackQuery.Data[len("delete_alert-"):]
+
+	// delete alert from database
+	alertId, err := strconv.ParseInt(alertIdStr, 10, 64)
+	if err != nil {
+		sugar.Errorw("Failed to parse alert ID", "error", err)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.CallbackQuery.Message.Message.Chat.ID,
+			Text:   "خطا در حذف اعلان.",
+		})
+		return
+	}
+	err = db.Update(func(txn *badger.Txn) error {
+		key := []byte(fmt.Sprintf("alert-%d-%d", update.CallbackQuery.Message.Message.Chat.ID, alertId))
+		println(string(key))
+		return txn.Delete(key)
+	})
+	if err != nil {
+		sugar.Errorw("Failed to delete alert", "error", err)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.CallbackQuery.Message.Message.Chat.ID,
+			Text:   "خطا در حذف اعلان.",
+		})
+		return
+	}
+
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: update.CallbackQuery.Message.Message.Chat.ID,
+		Text:   "اعلان با موفقیت حذف شد.",
+	})
+
 }
 
 func handlerAlertSet(ctx context.Context, b *bot.Bot, update *models.Update) {

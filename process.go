@@ -100,8 +100,6 @@ func setAlertEmpty(chatId int64) Process {
 //
 //	error: An error if the operation fails, otherwise nil.
 func setAlertOnComplete(p Process) error {
-	key := "alert-" + strconv.FormatInt(p.ChatId, 10)
-
 	interval, err := strconv.Atoi(p.Step[2].Data)
 	if err != nil {
 		return err
@@ -115,6 +113,8 @@ func setAlertOnComplete(p Process) error {
 			Interval: interval,
 			ChatId:   p.ChatId,
 		}
+
+		key := "alert-" + strconv.FormatInt(p.ChatId, 10) + "-" + strconv.FormatInt(alert.Id, 10)
 
 		value, err := json.Marshal(alert)
 		if err != nil {
