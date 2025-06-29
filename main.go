@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -10,8 +9,6 @@ import (
 	"go.uber.org/zap"
 	"os"
 	"os/signal"
-	"strconv"
-	"time"
 )
 
 var logger *zap.Logger
@@ -69,7 +66,7 @@ func main() {
 }
 
 func handlerSetAlert(ctx context.Context, b *bot.Bot, update *models.Update) {
-	p, err := ProcessStartSetAlert(update.Message.Chat.ID, db)
+	p, err := ProcessStart(ProcessKey.SetAlert, update.Message.Chat.ID, db)
 	if err != nil {
 		sugar.Errorw("Failed to start alert process", "error", err)
 		b.SendMessage(ctx, &bot.SendMessageParams{
@@ -85,86 +82,36 @@ func handlerSetAlert(ctx context.Context, b *bot.Bot, update *models.Update) {
 	})
 }
 
-func currentProcess(chatId int64, db *badger.DB) (string, Process, error) {
-	var processKey string
-	err := db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte(strconv.FormatInt(chatId, 10) + "-CURRENT_PROCESS"))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(val []byte) error {
-			processKey = string(val)
-			return nil
-		})
-	})
-	if err != nil {
-		return "", Process{}, err
-	}
-
-	var p Process
-	err = db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte(strconv.FormatInt(chatId, 10) + "-" + processKey))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(val []byte) error {
-			if err := json.Unmarshal(val, &p); err != nil {
-				return err
-			}
-			return nil
-		})
-	})
-	if err != nil {
-		return "", Process{}, err
-	}
-
-	return processKey, p, nil
-}
-
 func handlerDefault(ctx context.Context, b *bot.Bot, update *models.Update) {
-	key, p, err := currentProcess(update.Message.Chat.ID, db)
+	key, p, err := CurrentProcess(update.Message.Chat.ID, db)
 	if err != nil {
-		sugar.Errorw("Failed to get current process", "error", err)
 		b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
-			Text:   "خطا در دریافت فرآیند جاری.",
+			Text:   "لطفا یکی از دستورات را انتخاب کنید.",
 		})
 		return
 	}
 
 	if key != "" {
-		if p.CurrentStepIndex < len(p.Step)-1 {
-			p.Step[p.CurrentStepIndex].Data = update.Message.Text
-			p.CurrentStepIndex++
-			p.LastActionAt = time.Now().Unix()
-			err = db.Update(func(txn *badger.Txn) error {
-				userProcessKey := []byte(strconv.FormatInt(update.Message.Chat.ID, 10) + "-" + key)
-				value, err := json.Marshal(p)
-				if err != nil {
-					return err
-				}
-				return txn.Set(userProcessKey, value)
-			})
-			if err != nil {
-				sugar.Errorw("Failed to update process", "error", err)
-				b.SendMessage(ctx, &bot.SendMessageParams{
-					ChatID: update.Message.Chat.ID,
-					Text:   "خطا در ثبت.",
-				})
-				return
-			}
-
+		p, err = ProcessGoNextStep(p, update.Message.Text, db)
+		if err != nil {
+			sugar.Errorw("Failed to go to next step", "error", err)
 			b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: update.Message.Chat.ID,
-				Text:   p.Step[p.CurrentStepIndex].Message,
-			})
-			return
-		} else {
-			b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID: update.Message.Chat.ID,
-				Text:   "فرآیند تکمیل شد.",
+				Text:   "خطا در ادامه فرآیند.",
 			})
 			return
 		}
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   p.Step[p.CurrentStepIndex].Message,
+		})
+		return
+	} else {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "لطفا یکی از دستورات را انتخاب کنید.",
+		})
+		return
 	}
 }
