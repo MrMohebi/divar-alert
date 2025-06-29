@@ -60,12 +60,12 @@ func main() {
 		sugar.Fatal(err)
 	}
 
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/setAlert", bot.MatchTypeExact, handlerSetAlert)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertSet", bot.MatchTypeExact, handlerAlertSet)
 
 	b.Start(ctx)
 }
 
-func handlerSetAlert(ctx context.Context, b *bot.Bot, update *models.Update) {
+func handlerAlertSet(ctx context.Context, b *bot.Bot, update *models.Update) {
 	p, err := ProcessStart(ProcessKey.SetAlert, update.Message.Chat.ID, db)
 	if err != nil {
 		sugar.Errorw("Failed to start alert process", "error", err)

@@ -64,6 +64,11 @@ func setAlertEmpty(chatId int64) Process {
 		Id: ProcessKey.SetAlert,
 		Step: []Step{
 			{
+				Name:    "name",
+				Data:    "",
+				Message: "لطفا نام اعلان را ارسال کنید:",
+			},
+			{
 				Name:    "link",
 				Data:    "",
 				Message: "لطفا لینک دیوار را ارسال کنید:",
@@ -76,7 +81,7 @@ func setAlertEmpty(chatId int64) Process {
 			{
 				Name:    "end",
 				Data:    "",
-				Message: "هشدار با موفقیت تنظیم شد.",
+				Message: "اعلان با موفقیت تنظیم شد.",
 			},
 		},
 		CurrentStepIndex: 0,
