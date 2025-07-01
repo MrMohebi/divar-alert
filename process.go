@@ -107,11 +107,12 @@ func setAlertOnComplete(p Process) error {
 
 	return db.Update(func(txn *badger.Txn) error {
 		alert := Alert{
-			Id:       time.Now().UnixNano(),
-			Title:    p.Step[0].Data,
-			Link:     p.Step[1].Data,
-			Interval: interval,
-			ChatId:   p.ChatId,
+			Id:              time.Now().UnixNano(),
+			Title:           p.Step[0].Data,
+			Link:            p.Step[1].Data,
+			Interval:        interval,
+			ChatId:          p.ChatId,
+			LastTimeChecked: time.Now().Unix(),
 		}
 
 		key := "alert-" + strconv.FormatInt(p.ChatId, 10) + "-" + strconv.FormatInt(alert.Id, 10)

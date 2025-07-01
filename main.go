@@ -70,6 +70,10 @@ func main() {
 	b.Start(ctx)
 }
 
+func checkForNewAlert() {
+
+}
+
 func handlerCallbackDeleteAlert(ctx context.Context, b *bot.Bot, update *models.Update) {
 	b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
 		CallbackQueryID: update.CallbackQuery.ID,
