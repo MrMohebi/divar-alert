@@ -3,3 +3,6 @@
 tmp
 badger
 db.badger
+
+t1.*
+t2.*
