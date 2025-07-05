@@ -116,7 +116,7 @@ func checkForNewAlert() {
 				slices.Reverse(res.ListWidgets)
 				for _, post := range res.ListWidgets {
 					// check if post is already in database
-					key := fmt.Sprintf("post-%s", post.Data.Token)
+					key := fmt.Sprintf("post-%s-%d", post.Data.Token, alert.Id)
 					_, err := txn.Get([]byte(key))
 					if errors.Is(err, badger.ErrKeyNotFound) {
 						// post not found, save it to database
