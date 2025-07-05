@@ -1,6 +1,7 @@
 services:
   app:
-    build: .
+#    build: .
+    image: ghcr.io/mrmohebi/divar-alert:latest
     container_name: divar-alert-bot
     restart: unless-stopped
     environment:
