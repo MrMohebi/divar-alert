@@ -1,7 +1,7 @@
 services:
   app:
     build: .
-    container_name: divar-alert
+    container_name: divar-alert-bot
     restart: unless-stopped
     environment:
       - TELEGRAM_BOT_TOKEN=
