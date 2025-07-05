@@ -6,6 +6,6 @@ services:
     environment:
       - TELEGRAM_BOT_TOKEN=
       - TELEGRAM_API_URL=https://tapi.bale.ai
-      - DB_PATH=./db.badger
+      - DB_PATH=/root/app/db.badger
     volumes:
-      - ./db.badger:/db.badger
+      - ./db.badger:/root/app/db.badger
