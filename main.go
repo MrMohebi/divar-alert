@@ -3,21 +3,27 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/joho/godotenv"
+	"github.com/mrmohebi/divar-alert/divar"
 	"go.uber.org/zap"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
+	"time"
 )
 
 var logger *zap.Logger
 var sugar *zap.SugaredLogger
 
 var db *badger.DB
+
+var b *bot.Bot
 
 func main() {
 	logger, _ = zap.NewProduction()
@@ -59,10 +65,12 @@ func main() {
 		bot.WithCallbackQueryDataHandler("delete_alert-", bot.MatchTypePrefix, handlerCallbackDeleteAlert),
 	}
 
-	b, err := bot.New(TelegramToken, opts...)
+	b, err = bot.New(TelegramToken, opts...)
 	if err != nil {
 		sugar.Fatal(err)
 	}
+
+	go checkForNewAlert()
 
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertSet", bot.MatchTypeExact, handlerAlertSet)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertList", bot.MatchTypeExact, handlerAlertList)
@@ -71,7 +79,109 @@ func main() {
 }
 
 func checkForNewAlert() {
+	// read all alerts from the database
+	err := db.Update(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte("alert-")
+		it := txn.NewIterator(opts)
+		defer it.Close()
 
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			var alert Alert
+			err := item.Value(func(val []byte) error {
+				return json.Unmarshal(val, &alert)
+			})
+			if err != nil {
+				sugar.Errorw("Failed to unmarshal alert", "error", err)
+				continue
+			}
+
+			// check if alert is due for checking
+			if alert.LastTimeChecked+int64(alert.Interval) > time.Now().Unix() {
+				//sugar.Infow("Skipping alert check, not due yet", "alert", alert.Title)
+				continue
+			}
+
+			sugar.Infow("Checking for new posts for alert", "alert", alert.Title)
+
+			res, err := divar.Search(alert.Link)
+
+			if err != nil {
+				sugar.Errorw("Failed to search for alert", "error", err, "alert", alert.Title)
+				continue
+			}
+			// check posts are already in database, if they are not, save them and send message to user
+			if len(res.ListWidgets) > 0 {
+				slices.Reverse(res.ListWidgets)
+				for _, post := range res.ListWidgets {
+					// check if post is already in database
+					key := fmt.Sprintf("post-%s", post.Data.Token)
+					_, err := txn.Get([]byte(key))
+					if errors.Is(err, badger.ErrKeyNotFound) {
+						// post not found, save it to database
+						value, err := json.Marshal(post)
+						if err != nil {
+							sugar.Errorw("Failed to marshal post", "error", err, "post", post.Data.Title)
+							continue
+						}
+						err = txn.Set([]byte(key), value)
+						if err != nil {
+							sugar.Errorw("Failed to save post to database", "error", err, "post", post.Data.Title)
+							continue
+						}
+
+						text := "پست جدید برای: " + alert.Title + "\n\n"
+						text += post.Data.Title + "\n"
+						text += post.Data.TopDescriptionText + "\n"
+						text += post.Data.BottomDescriptionText + "\n"
+						text += post.Data.MiddleDescriptionText + "\n\n"
+						text += fmt.Sprintf("https://divar.ir/v/%s", post.Data.Token)
+
+						// send message to user
+						b.SendPhoto(context.Background(), &bot.SendPhotoParams{
+							ChatID:  alert.ChatId,
+							Photo:   &models.InputFileString{Data: post.Data.ImageURL},
+							Caption: text,
+						})
+					} else if err != nil {
+						sugar.Errorw("Failed to get post from database", "error", err, "post", post.Data.Title)
+					}
+				}
+			} else {
+				sugar.Infow("No new posts found for alert", "alert", alert.Title)
+			}
+
+			// update last time checked
+			alert.LastTimeChecked = time.Now().Unix()
+			key := fmt.Sprintf("alert-%d-%d", alert.ChatId, alert.Id)
+			value, err := json.Marshal(alert)
+			if err != nil {
+				sugar.Errorw("Failed to marshal alert", "error", err, "alert", alert.Title)
+				return err
+			}
+			err = txn.Set([]byte(key), value)
+			if err != nil {
+				sugar.Errorw("Failed to save alert to database", "error", err, "alert", alert.Title)
+				return err
+			}
+
+			if err != nil {
+				sugar.Errorw("Failed to update last time checked for alert", "error", err, "alert", alert)
+				continue
+			}
+
+		}
+		return nil
+	})
+	if err != nil {
+		sugar.Errorw("Failed to read alerts from database", "error", err)
+		return
+	}
+
+	time.Sleep(1 * time.Second)
+	sugar.Infow("Finished checking for new alerts")
+	checkForNewAlert()
 }
 
 func handlerCallbackDeleteAlert(ctx context.Context, b *bot.Bot, update *models.Update) {
