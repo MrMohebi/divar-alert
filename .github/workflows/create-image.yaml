@@ -1,0 +1,27 @@
+name: Deploy Images to GHCR
+
+on:
+  release:
+    types: [ created ]
+
+jobs:
+  app-image:
+      runs-on: ubuntu-latest
+      steps:
+        - name: 'Checkout GitHub Action'
+          uses: actions/checkout@main
+
+        - name: 'Login to GitHub Container Registry'
+          uses: docker/login-action@v3
+          with:
+            registry: ghcr.io
+            username: ${{github.actor}}
+            password: ${{secrets.GITHUB_TOKEN}}
+
+        - name: 'Build Inventory Image'
+          run: |
+            docker build . --build-arg VERSION_TO_GET=${{ github.ref_name }} --tag ghcr.io/mrmohebi/divar-alert:${{ github.ref_name }}
+            docker push ghcr.io/mrmohebi/divar-alert:${{ github.ref_name }}
+            docker tag ghcr.io/mrmohebi/divar-alert:${{ github.ref_name }} ghcr.io/mrmohebi/divar-alert:latest
+            docker push ghcr.io/mrmohebi/divar-alert:latest
+            
