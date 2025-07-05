@@ -3,3 +3,5 @@ t1
 */**/t2*
 .env
 db.badger
+tmp
+.github
