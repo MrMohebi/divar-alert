@@ -8,7 +8,7 @@ RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o divar-alert .
 
 
 FROM alpine:3.17
-LABEL org.opencontainers.image.source="https://github.com/MrMohebi/stremio-ir-providers"
+LABEL org.opencontainers.image.source="https://github.com/MrMohebi/divar-alert"
 
 WORKDIR /root/app
 
