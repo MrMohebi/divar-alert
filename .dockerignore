@@ -2,3 +2,4 @@ t1
 */**/t1*
 */**/t2*
 .env
+db.badger
