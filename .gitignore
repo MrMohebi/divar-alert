@@ -3,6 +3,7 @@
 tmp
 badger
 db.badger
+history/*.json
 
 t1.*
 t2.*
