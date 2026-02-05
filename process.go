@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
-	"github.com/dgraph-io/badger/v4"
+	"errors"
 	"strconv"
 	"time"
+
+	"github.com/mrmohebi/divar-alert/db"
 )
 
 // Step represents a single step in a process.
@@ -95,34 +97,37 @@ func setAlertEmpty(chatId int64) Process {
 // Parameters:
 //
 //	p (Process): The completed process.
+//	database (*db.DB): The database instance.
 //
 // Returns:
 //
 //	error: An error if the operation fails, otherwise nil.
-func setAlertOnComplete(p Process) error {
+func setAlertOnComplete(p Process, database *db.DB) error {
 	interval, err := strconv.Atoi(p.Step[2].Data)
 	if err != nil {
 		return err
 	}
 
-	return db.Update(func(txn *badger.Txn) error {
-		alert := Alert{
-			Id:              time.Now().UnixNano(),
-			Title:           p.Step[0].Data,
-			Link:            p.Step[1].Data,
-			Interval:        interval,
-			ChatId:          p.ChatId,
-			LastTimeChecked: time.Now().Unix(),
-		}
+	// Validate interval - minimum 10 seconds to prevent API abuse
+	if interval < 10 {
+		return errors.New("interval must be at least 10 seconds")
+	}
 
-		key := "alert-" + strconv.FormatInt(p.ChatId, 10) + "-" + strconv.FormatInt(alert.Id, 10)
+	// Validate interval - maximum 86400 seconds (24 hours) for reasonable limits
+	if interval > 86400 {
+		return errors.New("interval must be at most 86400 seconds (24 hours)")
+	}
 
-		value, err := json.Marshal(alert)
-		if err != nil {
-			return err
-		}
-		return txn.Set([]byte(key), value)
-	})
+	alert := db.Alert{
+		Id:              time.Now().UnixNano(),
+		Title:           p.Step[0].Data,
+		Link:            p.Step[1].Data,
+		Interval:        interval,
+		ChatId:          p.ChatId,
+		LastTimeChecked: time.Now().Unix(),
+	}
+
+	return database.InsertAlert(alert)
 }
 
 // preStartNewProcess prepares a new process by deleting previous processes
@@ -132,43 +137,14 @@ func setAlertOnComplete(p Process) error {
 //
 //	processKey (string): The key of the process to be started.
 //	chatId (int64): The ID of the chat for which the process is being started.
-//	db (*badger.DB): The Badger database instance.
+//	database (*db.DB): The database instance.
 //
 // Returns:
 //
 //	error: An error if the operation fails, otherwise nil.
-func preStartNewProcess(processKey string, chatId int64, db *badger.DB) error {
-	// delete previous processes for this user
-	err := db.Update(func(txn *badger.Txn) error {
-		prefix := []byte(strconv.FormatInt(chatId, 10) + "-" + processKey)
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close()
-
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			item := it.Item()
-			if err := txn.Delete(item.Key()); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	// set current process for this user
-	err = db.Update(func(txn *badger.Txn) error {
-		key := []byte(strconv.FormatInt(chatId, 10) + "-CURRENT_PROCESS")
-		value := []byte(processKey)
-		return txn.Set(key, value)
-	})
-	if err != nil {
-		return err
-	}
-
-	return nil
+func preStartNewProcess(processKey string, chatId int64, database *db.DB) error {
+	// Delete any existing process for this user and set the new one
+	return database.DeleteProcess(chatId)
 }
 
 // processOnComplete handles the completion of a process by saving it and cleaning up related keys.
@@ -176,16 +152,16 @@ func preStartNewProcess(processKey string, chatId int64, db *badger.DB) error {
 // Parameters:
 //
 //	p (Process): The completed process.
-//	db (*badger.DB): The Badger database instance.
+//	database (*db.DB): The database instance.
 //
 // Returns:
 //
 //	error: An error if the operation fails, otherwise nil.
-func processOnComplete(p Process, db *badger.DB) error {
+func processOnComplete(p Process, database *db.DB) error {
 	var err error
 	switch p.Id {
 	case ProcessKey.SetAlert:
-		err = setAlertOnComplete(p)
+		err = setAlertOnComplete(p, database)
 	default:
 		return nil
 	}
@@ -194,24 +170,8 @@ func processOnComplete(p Process, db *badger.DB) error {
 		return err
 	}
 
-	// delete current process key
-	err = db.Update(func(txn *badger.Txn) error {
-		key := []byte(strconv.FormatInt(p.ChatId, 10) + "-CURRENT_PROCESS")
-		return txn.Delete(key)
-	})
-	if err != nil {
-		return err
-	}
-	// delete process key
-	err = db.Update(func(txn *badger.Txn) error {
-		processKey := []byte(strconv.FormatInt(p.ChatId, 10) + "-" + p.Id)
-		return txn.Delete(processKey)
-	})
-	if err != nil {
-		return err
-	}
-
-	return nil
+	// Delete the process from the database
+	return database.DeleteProcess(p.ChatId)
 }
 
 // ProcessStart initializes and starts a new process based on the given key.
@@ -220,18 +180,17 @@ func processOnComplete(p Process, db *badger.DB) error {
 //
 //	key (string): The key of the process to be started.
 //	chatId (int64): The ID of the chat for which the process is being started.
-//	db (*badger.DB): The Badger database instance.
+//	database (*db.DB): The database instance.
 //
 // Returns:
 //
 //	Process: The initialized process.
 //	error: An error if the operation fails, otherwise nil.
-func ProcessStart(key string, chatId int64, db *badger.DB) (Process, error) {
+func ProcessStart(key string, chatId int64, database *db.DB) (Process, error) {
 	var p Process
-	var err error
 
-	// pre-start new process
-	err = preStartNewProcess(key, chatId, db)
+	// pre-start new process (delete any existing)
+	err := preStartNewProcess(key, chatId, database)
 	if err != nil {
 		return Process{}, err
 	}
@@ -243,15 +202,12 @@ func ProcessStart(key string, chatId int64, db *badger.DB) (Process, error) {
 		return Process{}, nil
 	}
 
-	// save process struct as json string to db
-	err = db.Update(func(txn *badger.Txn) error {
-		userProcessKey := []byte(strconv.FormatInt(chatId, 10) + "-" + key)
-		value, err := json.Marshal(p)
-		if err != nil {
-			return err
-		}
-		return txn.Set(userProcessKey, value)
-	})
+	// Save process to database as JSON
+	processData, err := json.Marshal(p)
+	if err != nil {
+		return Process{}, err
+	}
+	err = database.UpsertProcess(chatId, key, string(processData), p.LastActionAt)
 	if err != nil {
 		return Process{}, err
 	}
@@ -266,35 +222,31 @@ func ProcessStart(key string, chatId int64, db *badger.DB) (Process, error) {
 //
 //	p (Process): The current process.
 //	userInput (string): The user input for the current step.
-//	db (*badger.DB): The Badger database instance.
+//	database (*db.DB): The database instance.
 //
 // Returns:
 //
 //	Process: The updated process.
 //	error: An error if the operation fails, otherwise nil.
-func ProcessGoNextStep(p Process, userInput string, db *badger.DB) (Process, error) {
-	var err error
-
+func ProcessGoNextStep(p Process, userInput string, database *db.DB) (Process, error) {
 	if p.CurrentStepIndex < len(p.Step)-1 {
 		p.Step[p.CurrentStepIndex].Data = userInput
 		p.CurrentStepIndex++
 		p.LastActionAt = time.Now().Unix()
 
-		// save process struct as json string to db
-		err = db.Update(func(txn *badger.Txn) error {
-			userProcessKey := []byte(strconv.FormatInt(p.ChatId, 10) + "-" + p.Id)
-			value, err := json.Marshal(p)
-			if err != nil {
-				return err
-			}
-			return txn.Set(userProcessKey, value)
-		})
+		// Save process to database as JSON
+		processData, err := json.Marshal(p)
+		if err != nil {
+			return Process{}, err
+		}
+
+		err = database.UpsertProcess(p.ChatId, p.Id, string(processData), p.LastActionAt)
 		if err != nil {
 			return Process{}, err
 		}
 
 		if p.CurrentStepIndex == len(p.Step)-1 {
-			err = processOnComplete(p, db)
+			err = processOnComplete(p, database)
 			if err != nil {
 				return Process{}, err
 			}
@@ -303,7 +255,7 @@ func ProcessGoNextStep(p Process, userInput string, db *badger.DB) (Process, err
 		return p, nil
 	}
 
-	return Process{}, err
+	return Process{}, errors.New("process already completed")
 }
 
 // CurrentProcess retrieves the current process for a given chat ID.
@@ -311,45 +263,27 @@ func ProcessGoNextStep(p Process, userInput string, db *badger.DB) (Process, err
 // Parameters:
 //
 //	chatId (int64): The ID of the chat.
-//	db (*badger.DB): The Badger database instance.
+//	database (*db.DB): The database instance.
 //
 // Returns:
 //
 //	string: The key of the current process.
 //	Process: The current process.
 //	error: An error if the operation fails, otherwise nil.
-func CurrentProcess(chatId int64, db *badger.DB) (string, Process, error) {
-	var processKey string
-	err := db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte(strconv.FormatInt(chatId, 10) + "-CURRENT_PROCESS"))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(val []byte) error {
-			processKey = string(val)
-			return nil
-		})
-	})
+func CurrentProcess(chatId int64, database *db.DB) (string, Process, error) {
+	proc, err := database.GetProcess(chatId)
 	if err != nil {
 		return "", Process{}, err
+	}
+
+	if proc == nil {
+		return "", Process{}, errors.New("no process found")
 	}
 
 	var p Process
-	err = db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte(strconv.FormatInt(chatId, 10) + "-" + processKey))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(val []byte) error {
-			if err := json.Unmarshal(val, &p); err != nil {
-				return err
-			}
-			return nil
-		})
-	})
-	if err != nil {
+	if err := json.Unmarshal([]byte(proc.ProcessData), &p); err != nil {
 		return "", Process{}, err
 	}
 
-	return processKey, p, nil
+	return proc.ProcessKey, p, nil
 }

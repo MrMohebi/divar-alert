@@ -7,9 +7,11 @@ This project is a bot designed to monitor your filters on [Divar](https://divar.
 
 ### Key Features:
 - Monitor Divar filters and notify users of new posts.
+- **AI-powered evaluation** of rental/buy posts using OpenAI.
 - Supports both Telegram and Bale bots.
 - Persistent storage using [BadgerDB](https://github.com/dgraph-io/badger).
 - Easy-to-use commands for managing alerts.
+- Historical post tracking for better AI comparisons.
 
 ---
 
@@ -78,6 +80,40 @@ This project is a bot designed to monitor your filters on [Divar](https://divar.
     - Use the inline "Delete" button to remove an alert.
 4. **Receive Notifications**:
     - The bot will automatically notify you when new posts matching your filters are published.
+    - Each notification includes an AI evaluation with a score (1-100), decision, and explanation.
+
+---
+
+## AI Evaluation Feature
+
+The bot uses OpenAI to automatically evaluate each new rental/buy post by comparing it with the history of previous posts. This helps you quickly identify the best opportunities.
+
+### How It Works
+
+1. **Get Post Details**: When a new post is detected, the bot fetches the full post details.
+2. **Extract Important Data**: The bot extracts key information like price, location, property features, etc.
+3. **Load History**: The bot loads the history of all previous posts for the same alert.
+4. **AI Evaluation**: The bot sends the new post and history to OpenAI for analysis.
+5. **Receive Score & Decision**: The AI returns:
+   - A score from 1-100
+   - A decision: "Worth Renting", "Worth Buying", or "Not Worth It"
+   - A brief explanation (2-3 sentences)
+6. **Save to History**: The post is saved to the history for future comparisons.
+7. **Notification**: You receive a Telegram message with the post details and AI evaluation.
+
+### History Files
+
+Post history is stored in the `history/` directory as JSON files:
+- Each alert has its own history file: `history/posts_history_<alert_id>.json`
+- The history includes all important data extracted from each post
+- This allows the AI to make better comparisons over time
+
+### Customization
+
+You can customize the AI behavior by:
+- Using a different OpenAI model (set `OPENAI_MODEL` in `.env`)
+- Using a compatible OpenAI API endpoint (set `OPENAI_BASE_URL` in `.env`)
+- The bot will continue to work without AI evaluation if OpenAI credentials are not provided
 
 ---
 
@@ -88,6 +124,9 @@ This project is a bot designed to monitor your filters on [Divar](https://divar.
 | `TELEGRAM_BOT_TOKEN`| The token for your Telegram or Bale bot.         |
 | `TELEGRAM_API_URL`  | The API URL for Telegram or Bale.                |
 | `DB_PATH`           | The path to the directory where the database is stored. |
+| `OPENAI_API_KEY`    | Your OpenAI API key for AI evaluations.          |
+| `OPENAI_BASE_URL`   | (Optional) OpenAI API base URL. Default: `https://api.openai.com/v1` |
+| `OPENAI_MODEL`      | (Optional) OpenAI model to use. Default: `gpt-4o-mini` |
 
 ---
 
@@ -96,6 +135,11 @@ This project is a bot designed to monitor your filters on [Divar](https://divar.
 TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 TELEGRAM_API_URL=https://api.telegram.org
 DB_PATH=./db.badger
+
+# OpenAI Configuration (for AI evaluation)
+OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxx
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
 ```
 
 ---

@@ -1,8 +1,7 @@
 .idea
 .env
 tmp
-badger
-db.badger
+data.db*
 history/*.json
 
 t1.*

@@ -2,14 +2,15 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"github.com/dgraph-io/badger/v4"
+	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/joho/godotenv"
+	"github.com/mrmohebi/divar-alert/ai"
+	"github.com/mrmohebi/divar-alert/db"
 	"github.com/mrmohebi/divar-alert/divar"
+	"github.com/mrmohebi/divar-alert/history"
 	"go.uber.org/zap"
 	"os"
 	"os/signal"
@@ -21,7 +22,7 @@ import (
 var logger *zap.Logger
 var sugar *zap.SugaredLogger
 
-var db *badger.DB
+var database *db.DB
 
 var b *bot.Bot
 
@@ -49,11 +50,35 @@ func main() {
 	}
 
 	// ------------------ init db -----------------
-	db, err = badger.Open(badger.DefaultOptions(DBPath))
+	database, err = db.Open(DBPath)
+
 	if err != nil {
 		sugar.Fatal(err)
 	}
-	defer db.Close()
+	defer database.Close()
+
+	//// DEBUG: select * from process
+	//processes, err := database.GetAllProcesses()
+	//if err != nil {
+	//	sugar.Errorw("Failed to query processes", "error", err)
+	//} else {
+	//	sugar.Info("===== DEBUG: All Processes =====")
+	//	for _, p := range processes {
+	//		sugar.Infow("Process",
+	//			"chat_id", p.ChatId,
+	//			"process_key", p.ProcessKey,
+	//			"process_data", p.ProcessData,
+	//			"last_action_at", p.LastActionAt,
+	//		)
+	//	}
+	//	sugar.Infof("Total processes: %d", len(processes))
+	//	sugar.Info("================================")
+	//}
+
+	// ------------------ init history directory -----------------
+	if err := history.EnsureHistoryDir(); err != nil {
+		sugar.Warnw("Failed to create history directory", "error", err)
+	}
 
 	// ------------------ init and config bot -----------------
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -78,110 +103,145 @@ func main() {
 	b.Start(ctx)
 }
 
+func check(args ...any) {
+	err := args[len(args)-1]
+	if err != nil {
+		panic(err)
+	}
+}
+
 func checkForNewAlert() {
-	// read all alerts from the database
-	err := db.Update(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = []byte("alert-")
-		it := txn.NewIterator(opts)
-		defer it.Close()
+	// Add panic recovery to prevent application crashes
+	defer func() {
+		if r := recover(); r != nil {
+			sugar.Errorw("Panic recovered in checkForNewAlert", "panic", r)
+			// Restart the function after a panic
+			time.Sleep(5 * time.Second)
+			go checkForNewAlert()
+		}
+	}()
 
-		for it.Rewind(); it.Valid(); it.Next() {
-			item := it.Item()
-			var alert Alert
-			err := item.Value(func(val []byte) error {
-				return json.Unmarshal(val, &alert)
-			})
-			if err != nil {
-				sugar.Errorw("Failed to unmarshal alert", "error", err)
-				continue
-			}
+	// Infinite loop instead of recursion to prevent stack overflow
+	for {
+		// Read all alerts from the database
+		alerts, err := database.GetAllAlerts()
+		if err != nil {
+			sugar.Errorw("Failed to read alerts from database", "error", err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
 
+		// Process each alert
+		for _, alert := range alerts {
 			// check if alert is due for checking
 			if alert.LastTimeChecked+int64(alert.Interval) > time.Now().Unix() {
-				//sugar.Infow("Skipping alert check, not due yet", "alert", alert.Title)
 				continue
 			}
 
 			sugar.Infow("Checking for new posts for alert", "alert", alert.Title)
 
 			res, err := divar.Search(alert.Link)
-
 			if err != nil {
 				sugar.Errorw("Failed to search for alert", "error", err, "alert", alert.Title)
 				continue
 			}
-			// check posts are already in database, if they are not, save them and send message to user
+
+			// Process posts
 			if len(res.ListWidgets) > 0 {
 				slices.Reverse(res.ListWidgets)
+
 				for _, post := range res.ListWidgets {
 					// check if post is already in database
-					key := fmt.Sprintf("post-%s-%d", post.Data.Token, alert.Id)
-					_, err := txn.Get([]byte(key))
-					if errors.Is(err, badger.ErrKeyNotFound) {
-						// post not found, save it to database
-						value, err := json.Marshal(post)
+					exists, err := database.PostExists(post.Data.Token, alert.Id)
+					if err != nil {
+						sugar.Errorw("Failed to check post existence", "error", err, "post", post.Data.Title)
+						continue
+					}
+
+					if !exists {
+						// post not found, process it with AI evaluation
+
+						// Step 1: Get full post details
+						postDetail, err := divar.GetPost(post.Data.Token)
 						if err != nil {
-							sugar.Errorw("Failed to marshal post", "error", err, "post", post.Data.Title)
+							sugar.Errorw("Failed to get post details", "error", err, "token", post.Data.Token)
 							continue
 						}
-						err = txn.Set([]byte(key), value)
+
+						// Step 2: Extract important rental data
+						importantData := divar.ExtractRentalImportantData(postDetail)
+
+						// Step 3: Load history of previous posts
+						postHistory, err := history.LoadHistory(alert.Id)
+						if err != nil {
+							sugar.Errorw("Failed to load post history", "error", err, "alert", alert.Title)
+							postHistory = []interface{}{} // Continue with empty history
+						}
+
+						// Step 4: AI Evaluation
+						evaluation, err := ai.EvaluateRentalPost(importantData, postHistory)
+						if err != nil {
+							sugar.Errorw("Failed to evaluate post with AI", "error", err, "post", post.Data.Title)
+							// Continue without AI evaluation
+							evaluation = nil
+						}
+
+						// Step 5: Save to history
+						err = history.AppendToHistory(alert.Id, importantData)
+						if err != nil {
+							sugar.Errorw("Failed to save post to history", "error", err, "post", post.Data.Title)
+						}
+
+						// Step 6: Save to database
+						err = database.InsertPost(post.Data.Token, alert.Id, post, time.Now().Unix())
 						if err != nil {
 							sugar.Errorw("Failed to save post to database", "error", err, "post", post.Data.Title)
 							continue
 						}
 
+						// Step 7: Prepare notification message
 						text := "پست جدید برای: " + alert.Title + "\n\n"
 						text += post.Data.Title + "\n"
 						text += post.Data.TopDescriptionText + "\n"
 						text += post.Data.BottomDescriptionText + "\n"
 						text += post.Data.MiddleDescriptionText + "\n\n"
+
+						// Add AI evaluation if available
+						if evaluation != nil {
+							text += "━━━━━━━━━━━━━━━━━━\n"
+							text += "🤖 AI Evaluation:\n"
+							text += fmt.Sprintf("Score: %d/100\n", evaluation.Score)
+							text += fmt.Sprintf("Decision: %s\n", evaluation.Decision)
+							text += fmt.Sprintf("Explanation: %s\n\n", evaluation.Explanation)
+						}
+
 						text += fmt.Sprintf("https://divar.ir/v/%s", post.Data.Token)
 
-						// send message to user
-						b.SendPhoto(context.Background(), &bot.SendPhotoParams{
+						// Step 8: Send Telegram notification
+						_, err = b.SendPhoto(context.Background(), &bot.SendPhotoParams{
 							ChatID:  alert.ChatId,
 							Photo:   &models.InputFileString{Data: post.Data.ImageURL},
 							Caption: text,
 						})
-					} else if err != nil {
-						sugar.Errorw("Failed to get post from database", "error", err, "post", post.Data.Title)
+						if err != nil {
+							sugar.Errorw("Failed to send photo to user", "error", err, "alert", alert.Title)
+						}
 					}
 				}
 			} else {
 				sugar.Infow("No new posts found for alert", "alert", alert.Title)
 			}
 
-			// update last time checked
-			alert.LastTimeChecked = time.Now().Unix()
-			key := fmt.Sprintf("alert-%d-%d", alert.ChatId, alert.Id)
-			value, err := json.Marshal(alert)
+			// Update last time checked
+			err = database.UpdateAlertLastChecked(alert.Id, time.Now().Unix())
 			if err != nil {
-				sugar.Errorw("Failed to marshal alert", "error", err, "alert", alert.Title)
-				return err
+				sugar.Errorw("Failed to update last time checked for alert", "error", err, "alert", alert.Title)
 			}
-			err = txn.Set([]byte(key), value)
-			if err != nil {
-				sugar.Errorw("Failed to save alert to database", "error", err, "alert", alert.Title)
-				return err
-			}
-
-			if err != nil {
-				sugar.Errorw("Failed to update last time checked for alert", "error", err, "alert", alert)
-				continue
-			}
-
 		}
-		return nil
-	})
-	if err != nil {
-		sugar.Errorw("Failed to read alerts from database", "error", err)
-		return
-	}
 
-	time.Sleep(1 * time.Second)
-	sugar.Infow("Finished checking for new alerts")
-	checkForNewAlert()
+		sugar.Infow("Finished checking for new alerts")
+		time.Sleep(1 * time.Second)
+	}
 }
 
 func handlerCallbackDeleteAlert(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -202,11 +262,7 @@ func handlerCallbackDeleteAlert(ctx context.Context, b *bot.Bot, update *models.
 		})
 		return
 	}
-	err = db.Update(func(txn *badger.Txn) error {
-		key := []byte(fmt.Sprintf("alert-%d-%d", update.CallbackQuery.Message.Message.Chat.ID, alertId))
-		println(string(key))
-		return txn.Delete(key)
-	})
+	err = database.DeleteAlert(update.CallbackQuery.Message.Message.Chat.ID, alertId)
 	if err != nil {
 		sugar.Errorw("Failed to delete alert", "error", err)
 		b.SendMessage(ctx, &bot.SendMessageParams{
@@ -224,7 +280,7 @@ func handlerCallbackDeleteAlert(ctx context.Context, b *bot.Bot, update *models.
 }
 
 func handlerAlertSet(ctx context.Context, b *bot.Bot, update *models.Update) {
-	p, err := ProcessStart(ProcessKey.SetAlert, update.Message.Chat.ID, db)
+	p, err := ProcessStart(ProcessKey.SetAlert, update.Message.Chat.ID, database)
 	if err != nil {
 		sugar.Errorw("Failed to start alert process", "error", err)
 		b.SendMessage(ctx, &bot.SendMessageParams{
@@ -242,26 +298,7 @@ func handlerAlertSet(ctx context.Context, b *bot.Bot, update *models.Update) {
 
 func handlerAlertList(ctx context.Context, b *bot.Bot, update *models.Update) {
 
-	var alerts []Alert
-	err := db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = []byte("alert-" + strconv.FormatInt(update.Message.Chat.ID, 10))
-		it := txn.NewIterator(opts)
-		defer it.Close()
-
-		for it.Rewind(); it.Valid(); it.Next() {
-			item := it.Item()
-			var alert Alert
-			err := item.Value(func(val []byte) error {
-				return json.Unmarshal(val, &alert)
-			})
-			if err != nil {
-				return err
-			}
-			alerts = append(alerts, alert)
-		}
-		return nil
-	})
+	alerts, err := database.GetAlertsByChatId(update.Message.Chat.ID)
 	if err != nil {
 		sugar.Errorw("Failed to list alerts", "error", err)
 		b.SendMessage(ctx, &bot.SendMessageParams{
@@ -306,7 +343,8 @@ func handlerAlertList(ctx context.Context, b *bot.Bot, update *models.Update) {
 }
 
 func handlerDefault(ctx context.Context, b *bot.Bot, update *models.Update) {
-	key, p, err := CurrentProcess(update.Message.Chat.ID, db)
+	key, p, err := CurrentProcess(update.Message.Chat.ID, database)
+
 	if err != nil {
 		b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
@@ -316,7 +354,7 @@ func handlerDefault(ctx context.Context, b *bot.Bot, update *models.Update) {
 	}
 
 	if key != "" {
-		p, err = ProcessGoNextStep(p, update.Message.Text, db)
+		p, err = ProcessGoNextStep(p, update.Message.Text, database)
 		if err != nil {
 			sugar.Errorw("Failed to go to next step", "error", err)
 			b.SendMessage(ctx, &bot.SendMessageParams{
