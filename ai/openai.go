@@ -12,9 +12,12 @@ import (
 
 // EvaluationResult represents the AI's evaluation of a rental post
 type EvaluationResult struct {
-	Score       int    `json:"score"`       // 1-100
-	Decision    string `json:"decision"`    // "Worth Renting", "Worth Buying", "Not Worth It"
-	Explanation string `json:"explanation"` // Brief explanation
+	Score         int    `json:"score"`          // 1-100
+	PriceScore    int    `json:"price_score"`    // 1-100
+	LocationScore int    `json:"location_score"` // 1-100
+	FeaturesScore int    `json:"features_score"` // 1-100
+	Decision      string `json:"decision"`       // "Worth Renting", "Worth Buying", "Not Worth It"
+	Explanation   string `json:"explanation"`    // Brief explanation
 }
 
 // OpenAIRequest represents the structure for OpenAI API requests
@@ -65,16 +68,28 @@ func EvaluateRentalPost(newPost interface{}, history []interface{}) (*Evaluation
 	}
 
 	// Construct the prompt
-	prompt := fmt.Sprintf(`You are an AI real-estate evaluation agent.
+	prompt := fmt.Sprintf(`
+You are an AI real-estate evaluation agent focused on the Iranian market.
 
 You receive:
+
 1. A new property post (structured data)
 2. A history of previous posts for the same alert
 
 Your tasks:
-- Read and understand the history of previous posts
+
+- Carefully read and understand the history of previous posts
 - Compare the new post with previous ones
 - Evaluate its quality, value, and attractiveness
+- Consider the typical Iranian real-estate market conditions: 60%% of your evaluation should reflect local market trends, norms, and prices
+
+⚠️ Scoring Rules:
+- 70%% of the final score MUST be based on price compared to similar properties in the history
+- The remaining 30%% should consider:
+  - Location quality
+  - Property features (size, rooms, condition, amenities)
+  - Overall value and attractiveness
+- Include 60%% of the influence of Iranian market context in your assessment
 
 New Post:
 %s
@@ -82,14 +97,25 @@ New Post:
 History of Previous Posts:
 %s
 
-Output your response ONLY as a JSON object with this exact structure (no markdown, no code blocks, just raw JSON):
+Output your response ONLY as a raw JSON object with this exact structure (no markdown, no code blocks, no extra text):
+
 {
   "score": <number from 1 to 100>,
+  "price_score": <number from 1 to 100>,
+  "location_score": <number from 1 to 100>,
+  "features_score": <number from 1 to 100>,
   "decision": "<Worth Renting|Worth Buying|Not Worth It>",
-  "explanation": "<brief explanation in 2-3 sentences>"
+  "explanation": "<brief explanation in Persian, 2–3 sentences>"
 }
 
-Be objective, practical, and concise. Consider factors like price compared to similar properties, location quality, property features, and overall value. RESPOND IN PERSIOAN`, string(newPostJSON), string(historyJSON))
+Rules:
+- Be objective, practical, and concise
+- score must be computed as:
+  score = 0.7 * price_score + 0.15 * location_score + 0.15 * features_score
+- Base your judgment mainly on price vs similar posts
+- RESPOND ONLY IN PERSIAN
+- Do NOT add anything outside the JSON object
+`, string(newPostJSON), string(historyJSON))
 
 	// Create OpenAI request
 	reqBody := OpenAIRequest{

@@ -965,5 +965,13 @@ func ExtractRentalImportantData(post PostDetailRes) RentalPostImportantData {
 		}
 	}
 
+	// Fallback: If price data was not found in widgets, try to extract from Webengage
+	if data.Price.Deposit == "" && post.Webengage.Credit > 0 {
+		data.Price.Deposit = fmt.Sprintf("%d", post.Webengage.Credit)
+	}
+	if data.Price.Rent == "" && post.Webengage.Rent > 0 {
+		data.Price.Rent = fmt.Sprintf("%d", post.Webengage.Rent)
+	}
+
 	return data
 }

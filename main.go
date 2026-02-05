@@ -211,6 +211,9 @@ func checkForNewAlert() {
 							text += "━━━━━━━━━━━━━━━━━━\n"
 							text += "🤖 AI Evaluation:\n"
 							text += fmt.Sprintf("Score: %d/100\n", evaluation.Score)
+							text += fmt.Sprintf("PriceScore: %d/100\n", evaluation.PriceScore)
+							text += fmt.Sprintf("LocationScore: %d/100\n", evaluation.LocationScore)
+							text += fmt.Sprintf("FeaturesScore: %d/100\n", evaluation.FeaturesScore)
 							text += fmt.Sprintf("Decision: %s\n", evaluation.Decision)
 							text += fmt.Sprintf("Explanation: %s\n\n", evaluation.Explanation)
 						}
