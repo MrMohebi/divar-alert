@@ -2,7 +2,8 @@
 .env
 tmp
 data.db*
-history/*.json
+/data/
+divar-alert.db*
 
 t1.*
 t2.*

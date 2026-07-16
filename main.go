@@ -3,20 +3,21 @@ package main
 import (
 	"context"
 	"fmt"
-	_ "github.com/duckdb/duckdb-go/v2"
+	"os"
+	"os/signal"
+	"slices"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/joho/godotenv"
 	"github.com/mrmohebi/divar-alert/ai"
 	"github.com/mrmohebi/divar-alert/db"
 	"github.com/mrmohebi/divar-alert/divar"
-	"github.com/mrmohebi/divar-alert/history"
 	"go.uber.org/zap"
-	"os"
-	"os/signal"
-	"slices"
-	"strconv"
-	"time"
 )
 
 var logger *zap.Logger
@@ -25,6 +26,8 @@ var sugar *zap.SugaredLogger
 var database *db.DB
 
 var b *bot.Bot
+
+var alertPollInterval = time.Second
 
 func main() {
 	logger, _ = zap.NewProduction()
@@ -40,13 +43,17 @@ func main() {
 	TelegramToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	TelegramApiUrl := os.Getenv("TELEGRAM_API_URL")
 	DBPath := os.Getenv("DB_PATH")
+	alertPollInterval, err = parsePollInterval(os.Getenv("POLL_INTERVAL_SECONDS"))
+	if err != nil {
+		sugar.Fatal(err)
+	}
 
 	if TelegramApiUrl == "" || TelegramToken == "" || DBPath == "" {
 		sugar.Fatal("TELEGRAM_API_URL and TELEGRAM_BOT_TOKEN and DB_PATH must be set in .env file")
 	} else {
 		sugar.Infof("TELEGRAM_API_URL: %s", TelegramApiUrl)
-		sugar.Infof("TELEGRAM_BOT_TOKEN: %s", TelegramToken)
 		sugar.Infof("DB_PATH: %s", DBPath)
+		sugar.Infof("POLL_INTERVAL_SECONDS: %g", alertPollInterval.Seconds())
 	}
 
 	// ------------------ init db -----------------
@@ -75,59 +82,73 @@ func main() {
 	//	sugar.Info("================================")
 	//}
 
-	// ------------------ init history directory -----------------
-	if err := history.EnsureHistoryDir(); err != nil {
-		sugar.Warnw("Failed to create history directory", "error", err)
-	}
-
 	// ------------------ init and config bot -----------------
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	opts := []bot.Option{
 		bot.WithServerURL(TelegramApiUrl),
 		bot.WithDefaultHandler(handlerDefault),
 		bot.WithCallbackQueryDataHandler("delete_alert-", bot.MatchTypePrefix, handlerCallbackDeleteAlert),
+		bot.WithCallbackQueryDataHandler("confirm_delete-", bot.MatchTypePrefix, handlerCallbackConfirmDelete),
+		bot.WithCallbackQueryDataHandler("cancel_delete", bot.MatchTypeExact, handlerCallbackCancelDelete),
+		bot.WithCallbackQueryDataHandler("reset_alert-", bot.MatchTypePrefix, handlerCallbackResetAlert),
+		bot.WithCallbackQueryDataHandler("confirm_reset-", bot.MatchTypePrefix, handlerCallbackConfirmReset),
+		bot.WithCallbackQueryDataHandler("cancel_reset", bot.MatchTypeExact, handlerCallbackCancelReset),
+		bot.WithCallbackQueryDataHandler("toggle_ai-", bot.MatchTypePrefix, handlerCallbackToggleAI),
+		bot.WithCallbackQueryDataHandler("set_ai-", bot.MatchTypePrefix, handlerCallbackSetAI),
+		bot.WithCallbackQueryDataHandler("set_interval-", bot.MatchTypePrefix, handlerCallbackSetInterval),
+		bot.WithCallbackQueryDataHandler("menu_", bot.MatchTypePrefix, handlerCallbackMenu),
 	}
 
 	b, err = bot.New(TelegramToken, opts...)
 	if err != nil {
 		sugar.Fatal(err)
 	}
+	configureBotCommands(ctx, b)
 
-	go checkForNewAlert()
+	go checkForNewAlert(ctx)
 
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact, handlerStart)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/help", bot.MatchTypeExact, handlerStart)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/cancel", bot.MatchTypeExact, handlerCancel)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/alert_set", bot.MatchTypeExact, handlerAlertSet)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/alerts", bot.MatchTypeExact, handlerAlertList)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertSet", bot.MatchTypeExact, handlerAlertSet)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertList", bot.MatchTypeExact, handlerAlertList)
 
 	b.Start(ctx)
 }
 
-func check(args ...any) {
-	err := args[len(args)-1]
-	if err != nil {
-		panic(err)
+func checkForNewAlert(ctx context.Context) {
+	for ctx.Err() == nil {
+		panicked := runAlertPoller(ctx)
+		if !panicked || !sleep(ctx, 5*time.Second) {
+			return
+		}
 	}
 }
 
-func checkForNewAlert() {
-	// Add panic recovery to prevent application crashes
+func runAlertPoller(ctx context.Context) (panicked bool) {
 	defer func() {
-		if r := recover(); r != nil {
-			sugar.Errorw("Panic recovered in checkForNewAlert", "panic", r)
-			// Restart the function after a panic
-			time.Sleep(5 * time.Second)
-			go checkForNewAlert()
+		if recovered := recover(); recovered != nil {
+			sugar.Errorw("Panic recovered in alert poller", "panic", recovered)
+			panicked = true
 		}
 	}()
 
-	// Infinite loop instead of recursion to prevent stack overflow
 	for {
+		if ctx.Err() != nil {
+			return
+		}
+
 		// Read all alerts from the database
 		alerts, err := database.GetAllAlerts()
 		if err != nil {
 			sugar.Errorw("Failed to read alerts from database", "error", err)
-			time.Sleep(1 * time.Second)
+			if !sleep(ctx, time.Second) {
+				return
+			}
 			continue
 		}
 
@@ -143,6 +164,9 @@ func checkForNewAlert() {
 			res, err := divar.Search(alert.Link)
 			if err != nil {
 				sugar.Errorw("Failed to search for alert", "error", err, "alert", alert.Title)
+				if updateErr := database.UpdateAlertLastChecked(alert.Id, time.Now().Unix()); updateErr != nil {
+					sugar.Errorw("Failed to update last time checked", "error", updateErr, "alert", alert.Title)
+				}
 				continue
 			}
 
@@ -159,47 +183,30 @@ func checkForNewAlert() {
 					}
 
 					if !exists {
-						// post not found, process it with AI evaluation
+						var evaluation *ai.EvaluationResult
+						var importantData divar.PostImportantData
+						if alert.AIEnabled {
+							postDetail, err := divar.GetPost(post.Data.Token)
+							if err != nil {
+								sugar.Errorw("Failed to get post details", "error", err, "token", post.Data.Token)
+								continue
+							}
 
-						// Step 1: Get full post details
-						postDetail, err := divar.GetPost(post.Data.Token)
-						if err != nil {
-							sugar.Errorw("Failed to get post details", "error", err, "token", post.Data.Token)
-							continue
+							importantData = divar.ExtractImportantData(postDetail)
+							postHistory, historyErr := database.LoadHistory(alert.Id)
+							if historyErr != nil {
+								sugar.Errorw("Failed to load post history", "error", historyErr, "alert", alert.Title)
+								postHistory = []interface{}{}
+							}
+
+							evaluation, err = ai.EvaluatePost(ctx, importantData, postHistory, alert.AnalysisPrompt)
+							if err != nil {
+								sugar.Errorw("Failed to analyze post with AI", "error", err, "post", post.Data.Title)
+								evaluation = nil
+							}
 						}
 
-						// Step 2: Extract important rental data
-						importantData := divar.ExtractRentalImportantData(postDetail)
-
-						// Step 3: Load history of previous posts
-						postHistory, err := history.LoadHistory(alert.Id)
-						if err != nil {
-							sugar.Errorw("Failed to load post history", "error", err, "alert", alert.Title)
-							postHistory = []interface{}{} // Continue with empty history
-						}
-
-						// Step 4: AI Evaluation
-						evaluation, err := ai.EvaluateRentalPost(importantData, postHistory)
-						if err != nil {
-							sugar.Errorw("Failed to evaluate post with AI", "error", err, "post", post.Data.Title)
-							// Continue without AI evaluation
-							evaluation = nil
-						}
-
-						// Step 5: Save to history
-						err = history.AppendToHistory(alert.Id, importantData)
-						if err != nil {
-							sugar.Errorw("Failed to save post to history", "error", err, "post", post.Data.Title)
-						}
-
-						// Step 6: Save to database
-						err = database.InsertPost(post.Data.Token, alert.Id, post, time.Now().Unix())
-						if err != nil {
-							sugar.Errorw("Failed to save post to database", "error", err, "post", post.Data.Title)
-							continue
-						}
-
-						// Step 7: Prepare notification message
+						// Step 5: Prepare notification message
 						text := "پست جدید برای: " + alert.Title + "\n\n"
 						text += post.Data.Title + "\n"
 						text += post.Data.TopDescriptionText + "\n"
@@ -209,25 +216,41 @@ func checkForNewAlert() {
 						// Add AI evaluation if available
 						if evaluation != nil {
 							text += "━━━━━━━━━━━━━━━━━━\n"
-							text += "🤖 AI Evaluation:\n"
+							text += "🤖 AI Analysis:\n"
 							text += fmt.Sprintf("Score: %d/100\n", evaluation.Score)
-							text += fmt.Sprintf("PriceScore: %d/100\n", evaluation.PriceScore)
-							text += fmt.Sprintf("LocationScore: %d/100\n", evaluation.LocationScore)
-							text += fmt.Sprintf("FeaturesScore: %d/100\n", evaluation.FeaturesScore)
+							if evaluation.PriceScore > 0 {
+								text += fmt.Sprintf("PriceScore: %d/100\n", evaluation.PriceScore)
+							}
+							if evaluation.LocationScore > 0 {
+								text += fmt.Sprintf("LocationScore: %d/100\n", evaluation.LocationScore)
+							}
+							if evaluation.FeaturesScore > 0 {
+								text += fmt.Sprintf("FeaturesScore: %d/100\n", evaluation.FeaturesScore)
+							}
 							text += fmt.Sprintf("Decision: %s\n", evaluation.Decision)
 							text += fmt.Sprintf("Explanation: %s\n\n", evaluation.Explanation)
 						}
 
 						text += fmt.Sprintf("https://divar.ir/v/%s", post.Data.Token)
 
-						// Step 8: Send Telegram notification
-						_, err = b.SendPhoto(context.Background(), &bot.SendPhotoParams{
-							ChatID:  alert.ChatId,
-							Photo:   &models.InputFileString{Data: post.Data.ImageURL},
-							Caption: text,
-						})
+						// Step 6: Send the notification before recording the post as delivered.
+						err = sendPostNotification(ctx, alert.ChatId, post.Data.ImageURL, text)
 						if err != nil {
-							sugar.Errorw("Failed to send photo to user", "error", err, "alert", alert.Title)
+							sugar.Errorw("Failed to notify user", "error", err, "alert", alert.Title)
+							continue
+						}
+
+						// Step 7: Record successful delivery so failed sends can be retried.
+						err = database.InsertPost(post.Data.Token, alert.Id, post, time.Now().Unix())
+						if err != nil {
+							sugar.Errorw("Failed to save delivered post", "error", err, "post", post.Data.Title)
+							continue
+						}
+
+						if alert.AIEnabled {
+							if err := database.AppendHistory(alert.Id, importantData); err != nil {
+								sugar.Errorw("Failed to save post to history", "error", err, "post", post.Data.Title)
+							}
 						}
 					}
 				}
@@ -243,139 +266,57 @@ func checkForNewAlert() {
 		}
 
 		sugar.Infow("Finished checking for new alerts")
-		time.Sleep(1 * time.Second)
-	}
-}
-
-func handlerCallbackDeleteAlert(ctx context.Context, b *bot.Bot, update *models.Update) {
-	b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
-		CallbackQueryID: update.CallbackQuery.ID,
-		ShowAlert:       false,
-	})
-
-	alertIdStr := update.CallbackQuery.Data[len("delete_alert-"):]
-
-	// delete alert from database
-	alertId, err := strconv.ParseInt(alertIdStr, 10, 64)
-	if err != nil {
-		sugar.Errorw("Failed to parse alert ID", "error", err)
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.CallbackQuery.Message.Message.Chat.ID,
-			Text:   "خطا در حذف اعلان.",
-		})
-		return
-	}
-	err = database.DeleteAlert(update.CallbackQuery.Message.Message.Chat.ID, alertId)
-	if err != nil {
-		sugar.Errorw("Failed to delete alert", "error", err)
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.CallbackQuery.Message.Message.Chat.ID,
-			Text:   "خطا در حذف اعلان.",
-		})
-		return
-	}
-
-	b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.CallbackQuery.Message.Message.Chat.ID,
-		Text:   "اعلان با موفقیت حذف شد.",
-	})
-
-}
-
-func handlerAlertSet(ctx context.Context, b *bot.Bot, update *models.Update) {
-	p, err := ProcessStart(ProcessKey.SetAlert, update.Message.Chat.ID, database)
-	if err != nil {
-		sugar.Errorw("Failed to start alert process", "error", err)
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "خطا در شروع فرآیند تنظیم هشدار.",
-		})
-		return
-	}
-
-	b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   p.Step[p.CurrentStepIndex].Message,
-	})
-}
-
-func handlerAlertList(ctx context.Context, b *bot.Bot, update *models.Update) {
-
-	alerts, err := database.GetAlertsByChatId(update.Message.Chat.ID)
-	if err != nil {
-		sugar.Errorw("Failed to list alerts", "error", err)
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "خطا در دریافت اعلان‌ها.",
-		})
-		return
-	}
-
-	if len(alerts) == 0 {
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "هیچ اعلان فعالی وجود ندارد.",
-		})
-		return
-	}
-
-	var response string
-
-	for i, alert := range alerts {
-		response += strconv.Itoa(i+1) + ". " + alert.Title + " (هر" + strconv.Itoa(alert.Interval) + " ثانیه)"
-		if i != len(alerts)-1 {
-			response += "\n"
-		}
-	}
-
-	var inlineKeyboardButtons [][]models.InlineKeyboardButton
-	for _, alert := range alerts {
-		inlineKeyboardButtons = append(inlineKeyboardButtons, []models.InlineKeyboardButton{
-			{
-				Text:         "حذف " + alert.Title,
-				CallbackData: "delete_alert-" + strconv.FormatInt(alert.Id, 10),
-			},
-		})
-	}
-
-	b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:      update.Message.Chat.ID,
-		Text:        response,
-		ReplyMarkup: &models.InlineKeyboardMarkup{InlineKeyboard: inlineKeyboardButtons},
-	})
-}
-
-func handlerDefault(ctx context.Context, b *bot.Bot, update *models.Update) {
-	key, p, err := CurrentProcess(update.Message.Chat.ID, database)
-
-	if err != nil {
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "لطفا یکی از دستورات را انتخاب کنید.",
-		})
-		return
-	}
-
-	if key != "" {
-		p, err = ProcessGoNextStep(p, update.Message.Text, database)
-		if err != nil {
-			sugar.Errorw("Failed to go to next step", "error", err)
-			b.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID: update.Message.Chat.ID,
-				Text:   "خطا در ادامه فرآیند.",
-			})
+		if !sleep(ctx, alertPollInterval) {
 			return
 		}
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   p.Step[p.CurrentStepIndex].Message,
-		})
-		return
-	} else {
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: update.Message.Chat.ID,
-			Text:   "لطفا یکی از دستورات را انتخاب کنید.",
-		})
-		return
+	}
+}
+
+func parsePollInterval(raw string) (time.Duration, error) {
+	if strings.TrimSpace(raw) == "" {
+		return time.Second, nil
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds < 1 || seconds > 3600 {
+		return 0, fmt.Errorf("POLL_INTERVAL_SECONDS must be an integer between 1 and 3600")
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
+
+func sendPostNotification(ctx context.Context, chatID int64, imageURL, text string) error {
+	if imageURL == "" {
+		_, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: truncateText(text, 4096)})
+		return err
+	}
+
+	_, err := b.SendPhoto(ctx, &bot.SendPhotoParams{
+		ChatID:  chatID,
+		Photo:   &models.InputFileString{Data: imageURL},
+		Caption: truncateText(text, 1024),
+	})
+	if err == nil {
+		return nil
+	}
+
+	_, fallbackErr := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: truncateText(text, 4096)})
+	return fallbackErr
+}
+
+func truncateText(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit-1]) + "…"
+}
+
+func sleep(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }

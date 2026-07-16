@@ -7,6 +7,7 @@ services:
     environment:
       - TELEGRAM_BOT_TOKEN=
       - TELEGRAM_API_URL=https://tapi.bale.ai
-      - DB_PATH=/root/app/db.badger
+      - DB_PATH=/root/app/data/divar-alert.db
+      - POLL_INTERVAL_SECONDS=1
     volumes:
-      - ./db.badger:/root/app/db.badger
+      - ./data:/root/app/data

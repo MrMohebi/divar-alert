@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -617,12 +619,12 @@ func parseCurlCommand(curlString string) (url string, headers map[string]string,
 	curlString = strings.TrimSpace(curlString)
 
 	// Extract URL - look for URL after 'curl' and before any flags
-	urlRegex := regexp.MustCompile(`curl\s+['"]?([^'"\s-]+)['"]?`)
+	urlRegex := regexp.MustCompile(`https://[^'"\s]+`)
 	urlMatches := urlRegex.FindStringSubmatch(curlString)
-	if len(urlMatches) < 2 {
+	if len(urlMatches) == 0 {
 		return "", nil, "", errors.New("failed to extract URL from curl command")
 	}
-	url = urlMatches[1]
+	url = urlMatches[0]
 
 	// Extract headers (-H or --header)
 	// This regex handles headers more robustly by capturing everything between quotes
@@ -667,9 +669,26 @@ func parseCurlCommand(curlString string) (url string, headers map[string]string,
 	return url, headers, body, nil
 }
 
+// ValidateSearchCommand ensures a user-supplied curl command targets only Divar's search API.
+func ValidateSearchCommand(curlString string) error {
+	rawURL, _, _, err := parseCurlCommand(curlString)
+	if err != nil {
+		return err
+	}
+
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid search URL: %w", err)
+	}
+	if parsedURL.Scheme != "https" || parsedURL.Hostname() != "api.divar.ir" || parsedURL.Path != APIPaths.SearchList {
+		return errors.New("curl command must target the Divar search API over HTTPS")
+	}
+	return nil
+}
+
 func Search(curlString string) (SearchRes, error) {
-	if !strings.Contains(curlString, APIPaths.SearchList) {
-		return SearchRes{}, errors.New("unsupported API endpoint")
+	if err := ValidateSearchCommand(curlString); err != nil {
+		return SearchRes{}, err
 	}
 
 	// Parse curl command instead of executing it
@@ -677,14 +696,6 @@ func Search(curlString string) (SearchRes, error) {
 	if err != nil {
 		return SearchRes{}, fmt.Errorf("failed to parse curl command: %w", err)
 	}
-
-	/*
-		In Divar's `/v8/postlist/w/search` API, there's a field called `last_post_date` that defines up to which date the API should return results.
-		I believe this is mainly for caching purposes—if the frontend sends the same data across multiple requests,we can serve cached results.
-		It also ensures that with multiple UI refreshes, the user sees consistent results instead of the latest updates. :)
-		So, I'm going to increase it to `2030`, which is a far future date—this way, it will always show the newest changes.
-	*/
-	body = strings.ReplaceAll(body, "2026-", "2030-")
 
 	// Create HTTP request
 	client := &http.Client{
@@ -788,9 +799,8 @@ func GetPost(postToken string) (PostDetailRes, error) {
 	return data, nil
 }
 
-// RentalPostImportantData holds the most important extracted information from a rental post (apartment/house)
-// Note: This struct is specific to rental listings. Other listing types (cars, electronics, etc.) will have different fields.
-type RentalPostImportantData struct {
+// PostImportantData contains general listing data plus optional rental-specific context.
+type PostImportantData struct {
 	Token           string                `json:"token"`
 	Title           string                `json:"title"`
 	Subtitle        string                `json:"subtitle"`
@@ -800,6 +810,7 @@ type RentalPostImportantData struct {
 	Location        LocationInfo          `json:"location"`
 	Images          []string              `json:"images"`
 	Features        []FeatureInfo         `json:"features"`
+	Attributes      map[string]string     `json:"attributes"`
 	ContactInfo     ContactDetails        `json:"contact"`
 	City            string                `json:"city"`
 	CityName        string                `json:"city_name"`
@@ -808,6 +819,9 @@ type RentalPostImportantData struct {
 	ExpiresAt       string                `json:"expires_at"`
 	URL             string                `json:"url"`
 }
+
+// RentalPostImportantData is retained for compatibility with existing history and callers.
+type RentalPostImportantData = PostImportantData
 
 // RentalPriceInfo contains pricing information for rental listings (deposit + monthly rent)
 type RentalPriceInfo struct {
@@ -842,21 +856,36 @@ type ContactDetails struct {
 	SecureCallEnabled bool   `json:"secure_call_enabled"`
 }
 
-// ExtractRentalImportantData extracts and structures the most important data from a rental post (apartment/house)
-// This function is specifically designed for rental listings. Other listing types will require different extraction logic.
-func ExtractRentalImportantData(post PostDetailRes) RentalPostImportantData {
-	data := RentalPostImportantData{
-		Token:     post.Webengage.Token,
-		City:      post.Webengage.City,
-		CityName:  post.City.Name,
-		Category:  post.Webengage.Category,
-		URL:       post.Share.WebURL,
-		ExpiresAt: post.Seo.UnavailableAfter,
+// ExtractImportantData extracts general listing data and preserves useful rental fields when present.
+func ExtractImportantData(post PostDetailRes) PostImportantData {
+	data := PostImportantData{
+		Token:      post.Webengage.Token,
+		City:       post.Webengage.City,
+		CityName:   post.City.Name,
+		Category:   post.Webengage.Category,
+		URL:        post.Share.WebURL,
+		ExpiresAt:  post.Seo.UnavailableAfter,
+		Attributes: map[string]string{},
 		ContactInfo: ContactDetails{
 			ChatEnabled:       post.Contact.ChatEnabled,
 			ContactUUID:       post.Contact.ContactUUID,
 			SecureCallEnabled: post.Contact.SecureCallEnabled,
 		},
+	}
+	if post.Webengage.BrandModel != "" {
+		data.Attributes["brand_model"] = post.Webengage.BrandModel
+	}
+	if post.Webengage.Originality != "" {
+		data.Attributes["originality"] = post.Webengage.Originality
+	}
+	if post.Webengage.BusinessType != "" {
+		data.Attributes["business_type"] = post.Webengage.BusinessType
+	}
+	if post.Webengage.Status != "" {
+		data.Attributes["status"] = post.Webengage.Status
+	}
+	if post.Webengage.Price > 0 {
+		data.Attributes["price"] = strconv.Itoa(post.Webengage.Price)
 	}
 
 	// Extract data from sections
@@ -965,6 +994,20 @@ func ExtractRentalImportantData(post PostDetailRes) RentalPostImportantData {
 		}
 	}
 
+	// Preserve category-specific key/value data such as mileage, color, or device condition.
+	for _, section := range post.Sections {
+		for _, widget := range section.Widgets {
+			if widget.Data.Title != "" && widget.Data.Value != "" {
+				data.Attributes[widget.Data.Title] = widget.Data.Value
+			}
+			for _, item := range widget.Data.Items {
+				if item.Title != "" && item.Value != "" {
+					data.Attributes[item.Title] = item.Value
+				}
+			}
+		}
+	}
+
 	// Fallback: If price data was not found in widgets, try to extract from Webengage
 	if data.Price.Deposit == "" && post.Webengage.Credit > 0 {
 		data.Price.Deposit = fmt.Sprintf("%d", post.Webengage.Credit)
@@ -974,4 +1017,9 @@ func ExtractRentalImportantData(post PostDetailRes) RentalPostImportantData {
 	}
 
 	return data
+}
+
+// ExtractRentalImportantData preserves the original rental-focused API.
+func ExtractRentalImportantData(post PostDetailRes) RentalPostImportantData {
+	return ExtractImportantData(post)
 }

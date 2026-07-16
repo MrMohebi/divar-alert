@@ -1,17 +1,18 @@
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
-WORKDIR /root/go/
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
-RUN apk --no-cache add make git gcc libtool musl-dev ca-certificates dumb-init curl
-RUN go get .
-RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o divar-alert .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /divar-alert .
 
 
 FROM alpine:3.17
 LABEL org.opencontainers.image.source="https://github.com/MrMohebi/divar-alert"
 
 WORKDIR /root/app
+RUN apk --no-cache add ca-certificates
 
-COPY --from=builder --chmod=777 /root/go/divar-alert ./divar-alert
+COPY --from=builder --chmod=755 /divar-alert ./divar-alert
 
 ENTRYPOINT ["/root/app/divar-alert"]

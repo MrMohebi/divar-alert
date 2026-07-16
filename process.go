@@ -3,10 +3,13 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mrmohebi/divar-alert/db"
+	"github.com/mrmohebi/divar-alert/divar"
 )
 
 // Step represents a single step in a process.
@@ -38,6 +41,7 @@ type Process struct {
 	Step             []Step `json:"step"`
 	CurrentStepIndex int    `json:"currentStepIndex"`
 	ChatId           int64  `json:"chatId"`
+	AlertId          int64  `json:"alertId,omitempty"`
 	LastActionAt     int64  `json:"lastActionAt"`
 }
 
@@ -47,9 +51,25 @@ type Process struct {
 //
 //	SetAlert (string): The key for the "SET_ALERT" process.
 var ProcessKey = struct {
-	SetAlert string
+	SetAlert    string
+	SetAIPrompt string
 }{
-	SetAlert: "SET_ALERT",
+	SetAlert:    "SET_ALERT",
+	SetAIPrompt: "SET_AI_PROMPT",
+}
+
+func setAIPromptEmpty(chatId, alertId int64) Process {
+	return Process{
+		Id: ProcessKey.SetAIPrompt,
+		Step: []Step{
+			{Name: "analysis_prompt", Message: "برای فعال کردن تحلیل هوش مصنوعی، شرایط بررسی آگهی را بنویسید:"},
+			{Name: "end", Message: "تحلیل هوش مصنوعی برای اعلان فعال شد."},
+		},
+		CurrentStepIndex: 0,
+		ChatId:           chatId,
+		AlertId:          alertId,
+		LastActionAt:     time.Now().Unix(),
+	}
 }
 
 // setAlertEmpty initializes a new "SET_ALERT" process with predefined steps.
@@ -73,12 +93,22 @@ func setAlertEmpty(chatId int64) Process {
 			{
 				Name:    "link",
 				Data:    "",
-				Message: "لطفا لینک دیوار را ارسال کنید:",
+				Message: "دستور curl جستجوی دیوار را بفرستید. در مرورگر وارد صفحه جستجو شوید، در DevTools بخش Network درخواست search را پیدا کنید و Copy as cURL را بزنید:",
+			},
+			{
+				Name:    "ai_enabled",
+				Data:    "",
+				Message: "تحلیل هوش مصنوعی برای این اعلان فعال باشد؟",
+			},
+			{
+				Name:    "analysis_prompt",
+				Data:    "",
+				Message: "می‌خواهید هوش مصنوعی آگهی‌ها را بر چه اساسی بررسی کند؟ مثال: فقط خودروهای بدون رنگ با قیمت مناسب را پیشنهاد بده.",
 			},
 			{
 				Name:    "interval",
 				Data:    "",
-				Message: "هر چند ثانیه میخواهید چک شود؟",
+				Message: "فاصله بررسی را انتخاب کنید یا عددی بین 10 تا 86400 ثانیه بفرستید:",
 			},
 			{
 				Name:    "end",
@@ -103,7 +133,11 @@ func setAlertEmpty(chatId int64) Process {
 //
 //	error: An error if the operation fails, otherwise nil.
 func setAlertOnComplete(p Process, database *db.DB) error {
-	interval, err := strconv.Atoi(p.Step[2].Data)
+	intervalData, err := getStepData(p, "interval")
+	if err != nil {
+		return err
+	}
+	interval, err := strconv.Atoi(intervalData)
 	if err != nil {
 		return err
 	}
@@ -118,16 +152,44 @@ func setAlertOnComplete(p Process, database *db.DB) error {
 		return errors.New("interval must be at most 86400 seconds (24 hours)")
 	}
 
+	title, err := getStepData(p, "title")
+	if err != nil {
+		return err
+	}
+	link, err := getStepData(p, "link")
+	if err != nil {
+		return err
+	}
+	analysisPrompt, _ := getStepData(p, "analysis_prompt")
+	aiEnabled := true
+	if aiEnabledData, aiErr := getStepData(p, "ai_enabled"); aiErr == nil {
+		aiEnabled, err = strconv.ParseBool(aiEnabledData)
+		if err != nil {
+			return err
+		}
+	}
+
 	alert := db.Alert{
 		Id:              time.Now().UnixNano(),
-		Title:           p.Step[0].Data,
-		Link:            p.Step[1].Data,
+		Title:           title,
+		Link:            link,
+		AIEnabled:       aiEnabled,
+		AnalysisPrompt:  analysisPrompt,
 		Interval:        interval,
 		ChatId:          p.ChatId,
 		LastTimeChecked: time.Now().Unix(),
 	}
 
 	return database.InsertAlert(alert)
+}
+
+func getStepData(p Process, name string) (string, error) {
+	for _, step := range p.Step {
+		if step.Name == name {
+			return step.Data, nil
+		}
+	}
+	return "", fmt.Errorf("process step %q not found", name)
 }
 
 // preStartNewProcess prepares a new process by deleting previous processes
@@ -162,6 +224,12 @@ func processOnComplete(p Process, database *db.DB) error {
 	switch p.Id {
 	case ProcessKey.SetAlert:
 		err = setAlertOnComplete(p, database)
+	case ProcessKey.SetAIPrompt:
+		prompt, promptErr := getStepData(p, "analysis_prompt")
+		if promptErr != nil {
+			return promptErr
+		}
+		err = database.UpdateAlertAnalysis(p.ChatId, p.AlertId, prompt)
 	default:
 		return nil
 	}
@@ -172,6 +240,21 @@ func processOnComplete(p Process, database *db.DB) error {
 
 	// Delete the process from the database
 	return database.DeleteProcess(p.ChatId)
+}
+
+func ProcessStartAIPrompt(chatId, alertId int64, database *db.DB) (Process, error) {
+	if err := preStartNewProcess(ProcessKey.SetAIPrompt, chatId, database); err != nil {
+		return Process{}, err
+	}
+	process := setAIPromptEmpty(chatId, alertId)
+	processData, err := json.Marshal(process)
+	if err != nil {
+		return Process{}, err
+	}
+	if err := database.UpsertProcess(chatId, process.Id, string(processData), process.LastActionAt); err != nil {
+		return Process{}, err
+	}
+	return process, nil
 }
 
 // ProcessStart initializes and starts a new process based on the given key.
@@ -230,8 +313,17 @@ func ProcessStart(key string, chatId int64, database *db.DB) (Process, error) {
 //	error: An error if the operation fails, otherwise nil.
 func ProcessGoNextStep(p Process, userInput string, database *db.DB) (Process, error) {
 	if p.CurrentStepIndex < len(p.Step)-1 {
-		p.Step[p.CurrentStepIndex].Data = userInput
+		validatedInput, err := validateStepInput(p.Step[p.CurrentStepIndex].Name, userInput)
+		if err != nil {
+			return p, err
+		}
+
+		p.Step[p.CurrentStepIndex].Data = validatedInput
 		p.CurrentStepIndex++
+		if p.Step[p.CurrentStepIndex-1].Name == "ai_enabled" && validatedInput == "false" && p.CurrentStepIndex < len(p.Step)-1 && p.Step[p.CurrentStepIndex].Name == "analysis_prompt" {
+			p.Step[p.CurrentStepIndex].Data = ""
+			p.CurrentStepIndex++
+		}
 		p.LastActionAt = time.Now().Unix()
 
 		// Save process to database as JSON
@@ -256,6 +348,38 @@ func ProcessGoNextStep(p Process, userInput string, database *db.DB) (Process, e
 	}
 
 	return Process{}, errors.New("process already completed")
+}
+
+func validateStepInput(stepName, input string) (string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", errors.New("input cannot be empty")
+	}
+
+	switch stepName {
+	case "ai_enabled":
+		if input != "true" && input != "false" {
+			return "", errors.New("choose whether AI analysis is enabled")
+		}
+	case "link":
+		if err := divar.ValidateSearchCommand(input); err != nil {
+			return "", err
+		}
+	case "interval":
+		interval, err := strconv.Atoi(input)
+		if err != nil {
+			return "", errors.New("interval must be a number")
+		}
+		if interval < 10 || interval > 86400 {
+			return "", errors.New("interval must be between 10 and 86400 seconds")
+		}
+	case "analysis_prompt":
+		if len([]rune(input)) > 4000 {
+			return "", errors.New("analysis prompt must be at most 4000 characters")
+		}
+	}
+
+	return input, nil
 }
 
 // CurrentProcess retrieves the current process for a given chat ID.
