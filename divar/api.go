@@ -2,6 +2,7 @@ package divar
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -744,6 +745,10 @@ func Search(curlString string) (SearchRes, error) {
 // GetPost fetches a single post detail by its token
 // Note: This returns the raw API response. The structure varies by listing type (rental, sale, etc.)
 func GetPost(postToken string) (PostDetailRes, error) {
+	return GetPostContext(context.Background(), postToken)
+}
+
+func GetPostContext(ctx context.Context, postToken string) (PostDetailRes, error) {
 	postToken = strings.TrimSpace(postToken)
 	if postToken == "" {
 		return PostDetailRes{}, errors.New("post token is required")
@@ -764,7 +769,7 @@ func GetPost(postToken string) (PostDetailRes, error) {
 	}
 
 	// Create request
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return PostDetailRes{}, fmt.Errorf("failed to create request: %w", err)
 	}

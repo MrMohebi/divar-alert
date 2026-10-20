@@ -15,6 +15,7 @@ import (
 	"github.com/go-telegram/bot/models"
 	"github.com/joho/godotenv"
 	"github.com/mrmohebi/divar-alert/ai"
+	"github.com/mrmohebi/divar-alert/conversation"
 	"github.com/mrmohebi/divar-alert/db"
 	"github.com/mrmohebi/divar-alert/divar"
 	"go.uber.org/zap"
@@ -82,23 +83,29 @@ func main() {
 	//	sugar.Info("================================")
 	//}
 
+	conversationService, err = conversation.NewService()
+	if err != nil {
+		sugar.Fatalw("Failed to load embedded catalogs", "error", err)
+	}
+
 	// ------------------ init and config bot -----------------
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	opts := []bot.Option{
 		bot.WithServerURL(TelegramApiUrl),
-		bot.WithDefaultHandler(handlerDefault),
-		bot.WithCallbackQueryDataHandler("delete_alert-", bot.MatchTypePrefix, handlerCallbackDeleteAlert),
-		bot.WithCallbackQueryDataHandler("confirm_delete-", bot.MatchTypePrefix, handlerCallbackConfirmDelete),
-		bot.WithCallbackQueryDataHandler("cancel_delete", bot.MatchTypeExact, handlerCallbackCancelDelete),
-		bot.WithCallbackQueryDataHandler("reset_alert-", bot.MatchTypePrefix, handlerCallbackResetAlert),
-		bot.WithCallbackQueryDataHandler("confirm_reset-", bot.MatchTypePrefix, handlerCallbackConfirmReset),
-		bot.WithCallbackQueryDataHandler("cancel_reset", bot.MatchTypeExact, handlerCallbackCancelReset),
-		bot.WithCallbackQueryDataHandler("toggle_ai-", bot.MatchTypePrefix, handlerCallbackToggleAI),
-		bot.WithCallbackQueryDataHandler("set_ai-", bot.MatchTypePrefix, handlerCallbackSetAI),
-		bot.WithCallbackQueryDataHandler("set_interval-", bot.MatchTypePrefix, handlerCallbackSetInterval),
-		bot.WithCallbackQueryDataHandler("menu_", bot.MatchTypePrefix, handlerCallbackMenu),
+		bot.WithCallbackQueryDataHandler("draft:", bot.MatchTypePrefix, serialized(handlerCallbackDraft)),
+		bot.WithDefaultHandler(serialized(handlerDefault)),
+		bot.WithCallbackQueryDataHandler("delete_alert-", bot.MatchTypePrefix, serialized(handlerCallbackDeleteAlert)),
+		bot.WithCallbackQueryDataHandler("confirm_delete-", bot.MatchTypePrefix, serialized(handlerCallbackConfirmDelete)),
+		bot.WithCallbackQueryDataHandler("cancel_delete", bot.MatchTypeExact, serialized(handlerCallbackCancelDelete)),
+		bot.WithCallbackQueryDataHandler("reset_alert-", bot.MatchTypePrefix, serialized(handlerCallbackResetAlert)),
+		bot.WithCallbackQueryDataHandler("confirm_reset-", bot.MatchTypePrefix, serialized(handlerCallbackConfirmReset)),
+		bot.WithCallbackQueryDataHandler("cancel_reset", bot.MatchTypeExact, serialized(handlerCallbackCancelReset)),
+		bot.WithCallbackQueryDataHandler("toggle_ai-", bot.MatchTypePrefix, serialized(handlerCallbackToggleAI)),
+		bot.WithCallbackQueryDataHandler("set_ai-", bot.MatchTypePrefix, serialized(handlerCallbackSetAI)),
+		bot.WithCallbackQueryDataHandler("set_interval-", bot.MatchTypePrefix, serialized(handlerCallbackSetInterval)),
+		bot.WithCallbackQueryDataHandler("menu_", bot.MatchTypePrefix, serialized(handlerCallbackMenu)),
 	}
 
 	b, err = bot.New(TelegramToken, opts...)
@@ -107,17 +114,21 @@ func main() {
 	}
 	configureBotCommands(ctx, b)
 
-	go checkForNewAlert(ctx)
+	pollerDone := make(chan struct{})
+	go func() { defer close(pollerDone); checkForNewAlert(ctx) }()
 
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact, handlerStart)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/help", bot.MatchTypeExact, handlerStart)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/cancel", bot.MatchTypeExact, handlerCancel)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/alert_set", bot.MatchTypeExact, handlerAlertSet)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/alerts", bot.MatchTypeExact, handlerAlertList)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertSet", bot.MatchTypeExact, handlerAlertSet)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertList", bot.MatchTypeExact, handlerAlertList)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact, serialized(handlerStart))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/help", bot.MatchTypeExact, serialized(handlerStart))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/cancel", bot.MatchTypeExact, serialized(handlerCancel))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/alert_set", bot.MatchTypeExact, serialized(handlerAlertSet))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/alerts", bot.MatchTypeExact, serialized(handlerAlertList))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertSet", bot.MatchTypeExact, serialized(handlerAlertSet))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertList", bot.MatchTypeExact, serialized(handlerAlertList))
 
 	b.Start(ctx)
+	cancel()
+	<-pollerDone
+	watchJobs.Wait()
 }
 
 func checkForNewAlert(ctx context.Context) {
@@ -159,6 +170,11 @@ func runAlertPoller(ctx context.Context) (panicked bool) {
 				continue
 			}
 
+			if alert.SearchQuery != "" {
+				launchStructuredPoll(ctx, alert)
+				continue
+			}
+
 			sugar.Infow("Checking for new posts for alert", "alert", alert.Title)
 
 			res, err := divar.Search(alert.Link)
@@ -186,23 +202,23 @@ func runAlertPoller(ctx context.Context) (panicked bool) {
 						var evaluation *ai.EvaluationResult
 						var importantData divar.PostImportantData
 						if alert.AIEnabled {
-							postDetail, err := divar.GetPost(post.Data.Token)
+							postDetail, err := divar.GetPostContext(ctx, post.Data.Token)
 							if err != nil {
 								sugar.Errorw("Failed to get post details", "error", err, "token", post.Data.Token)
-								continue
-							}
+							} else {
 
-							importantData = divar.ExtractImportantData(postDetail)
-							postHistory, historyErr := database.LoadHistory(alert.Id)
-							if historyErr != nil {
-								sugar.Errorw("Failed to load post history", "error", historyErr, "alert", alert.Title)
-								postHistory = []interface{}{}
-							}
+								importantData = divar.ExtractImportantData(postDetail)
+								postHistory, historyErr := database.LoadHistory(alert.Id)
+								if historyErr != nil {
+									sugar.Errorw("Failed to load post history", "error", historyErr, "alert", alert.Title)
+									postHistory = []interface{}{}
+								}
 
-							evaluation, err = ai.EvaluatePost(ctx, importantData, postHistory, alert.AnalysisPrompt)
-							if err != nil {
-								sugar.Errorw("Failed to analyze post with AI", "error", err, "post", post.Data.Title)
-								evaluation = nil
+								evaluation, err = ai.EvaluatePost(ctx, importantData, postHistory, alert.AnalysisPrompt)
+								if err != nil {
+									sugar.Errorw("Failed to analyze post with AI", "error", err, "post", post.Data.Title)
+									evaluation = nil
+								}
 							}
 						}
 
@@ -216,21 +232,24 @@ func runAlertPoller(ctx context.Context) (panicked bool) {
 						// Add AI evaluation if available
 						if evaluation != nil {
 							text += "━━━━━━━━━━━━━━━━━━\n"
-							text += "🤖 AI Analysis:\n"
-							text += fmt.Sprintf("Score: %d/100\n", evaluation.Score)
+							text += "🤖 تحلیل آگهی:\n"
+							text += fmt.Sprintf("امتیاز: %d از ۱۰۰\n", evaluation.Score)
 							if evaluation.PriceScore > 0 {
-								text += fmt.Sprintf("PriceScore: %d/100\n", evaluation.PriceScore)
+								text += fmt.Sprintf("امتیاز قیمت: %d از ۱۰۰\n", evaluation.PriceScore)
 							}
 							if evaluation.LocationScore > 0 {
-								text += fmt.Sprintf("LocationScore: %d/100\n", evaluation.LocationScore)
+								text += fmt.Sprintf("امتیاز موقعیت: %d از ۱۰۰\n", evaluation.LocationScore)
 							}
 							if evaluation.FeaturesScore > 0 {
-								text += fmt.Sprintf("FeaturesScore: %d/100\n", evaluation.FeaturesScore)
+								text += fmt.Sprintf("امتیاز امکانات: %d از ۱۰۰\n", evaluation.FeaturesScore)
 							}
-							text += fmt.Sprintf("Decision: %s\n", evaluation.Decision)
-							text += fmt.Sprintf("Explanation: %s\n\n", evaluation.Explanation)
+							text += fmt.Sprintf("پیشنهاد: %s\n", evaluation.Decision)
+							text += fmt.Sprintf("توضیح: %s\n\n", evaluation.Explanation)
 						}
 
+						if alert.AIEnabled && evaluation == nil {
+							text += "تحلیل آگهی فعلاً در دسترس نیست؛ آگهی را بدون امتیاز می‌فرستم.\n\n"
+						}
 						text += fmt.Sprintf("https://divar.ir/v/%s", post.Data.Token)
 
 						// Step 6: Send the notification before recording the post as delivered.
@@ -247,7 +266,7 @@ func runAlertPoller(ctx context.Context) (panicked bool) {
 							continue
 						}
 
-						if alert.AIEnabled {
+						if alert.AIEnabled && importantData.Token != "" {
 							if err := database.AppendHistory(alert.Id, importantData); err != nil {
 								sugar.Errorw("Failed to save post to history", "error", err, "post", post.Data.Title)
 							}

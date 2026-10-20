@@ -17,6 +17,8 @@ type DB struct {
 	conn *sql.DB
 }
 
+const maxSavedHistoryPosts = 50
+
 // Open opens a SQLite database and creates its schema when needed.
 func Open(path string) (*DB, error) {
 	if path == "" {
@@ -50,6 +52,15 @@ func Open(path string) (*DB, error) {
 	if err := database.createTables(); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("create sqlite schema (use a new DB_PATH, not the old DuckDB file): %w", err)
+	}
+	if _, err := conn.Exec(`DELETE FROM alert_history WHERE id IN (
+		SELECT id FROM (
+			SELECT id, ROW_NUMBER() OVER (PARTITION BY alert_id ORDER BY id DESC) AS position
+			FROM alert_history
+		) WHERE position > ?
+	)`, maxSavedHistoryPosts); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("trim saved alert history: %w", err)
 	}
 	return database, nil
 }
@@ -98,7 +109,10 @@ func (db *DB) createTables() error {
 			last_action_at INTEGER NOT NULL
 		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	return db.migrateAlerts()
 }
 
 // Alert represents an alert configuration.
@@ -111,17 +125,20 @@ type Alert struct {
 	Interval        int    `json:"interval"`
 	ChatId          int64  `json:"chatId"`
 	LastTimeChecked int64  `json:"lastTimeChecked"`
+	SearchQuery     string `json:"searchQuery,omitempty"`
+	OriginalPrompt  string `json:"originalPrompt,omitempty"`
+	WatchState      string `json:"watchState,omitempty"`
 }
 
 const selectAlerts = `
-	SELECT id, chat_id, title, link, ai_enabled, analysis_prompt, interval_seconds, last_time_checked
+	SELECT id, chat_id, title, link, ai_enabled, analysis_prompt, interval_seconds, last_time_checked, search_query, original_prompt, watch_state
 	FROM alerts`
 
 func scanAlerts(rows *sql.Rows) ([]Alert, error) {
 	var alerts []Alert
 	for rows.Next() {
 		var alert Alert
-		if err := rows.Scan(&alert.Id, &alert.ChatId, &alert.Title, &alert.Link, &alert.AIEnabled, &alert.AnalysisPrompt, &alert.Interval, &alert.LastTimeChecked); err != nil {
+		if err := rows.Scan(&alert.Id, &alert.ChatId, &alert.Title, &alert.Link, &alert.AIEnabled, &alert.AnalysisPrompt, &alert.Interval, &alert.LastTimeChecked, &alert.SearchQuery, &alert.OriginalPrompt, &alert.WatchState); err != nil {
 			return nil, err
 		}
 		alerts = append(alerts, alert)
@@ -148,10 +165,10 @@ func (db *DB) GetAlertsByChatId(chatId int64) ([]Alert, error) {
 }
 
 func (db *DB) InsertAlert(alert Alert) error {
-	_, err := db.conn.Exec(`
-		INSERT INTO alerts (id, chat_id, title, link, ai_enabled, analysis_prompt, interval_seconds, last_time_checked)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, alert.Id, alert.ChatId, alert.Title, alert.Link, alert.AIEnabled, alert.AnalysisPrompt, alert.Interval, alert.LastTimeChecked)
+	if alert.WatchState == "" {
+		alert.WatchState = "{}"
+	}
+	_, err := db.conn.Exec(insertAlertSQL, alert.Id, alert.ChatId, alert.Title, alert.Link, alert.AIEnabled, alert.AnalysisPrompt, alert.Interval, alert.LastTimeChecked, alert.SearchQuery, alert.OriginalPrompt, alert.WatchState)
 	return err
 }
 
@@ -204,9 +221,11 @@ func (db *DB) InsertPost(token string, alertId int64, data interface{}, createdA
 	return err
 }
 
-// LoadHistory restores prior posts in insertion order for AI context.
+// LoadHistory restores the latest 50 posts in insertion order for AI context.
 func (db *DB) LoadHistory(alertId int64) ([]interface{}, error) {
-	rows, err := db.conn.Query(`SELECT data FROM alert_history WHERE alert_id = ? ORDER BY id`, alertId)
+	rows, err := db.conn.Query(`SELECT data FROM (
+		SELECT id, data FROM alert_history WHERE alert_id = ? ORDER BY id DESC LIMIT ?
+	) ORDER BY id`, alertId, maxSavedHistoryPosts)
 	if err != nil {
 		return nil, err
 	}
@@ -227,14 +246,26 @@ func (db *DB) LoadHistory(alertId int64) ([]interface{}, error) {
 	return history, rows.Err()
 }
 
-// AppendHistory stores a post for future AI context.
+// AppendHistory atomically stores a post and retains only the alert's latest 50.
 func (db *DB) AppendHistory(alertId int64, post interface{}) error {
 	data, err := json.Marshal(post)
 	if err != nil {
 		return err
 	}
-	_, err = db.conn.Exec(`INSERT INTO alert_history (alert_id, data, created_at) VALUES (?, ?, ?)`, alertId, string(data), time.Now().Unix())
-	return err
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO alert_history (alert_id, data, created_at) VALUES (?, ?, ?)`, alertId, string(data), time.Now().Unix()); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM alert_history WHERE alert_id = ? AND id NOT IN (
+		SELECT id FROM alert_history WHERE alert_id = ? ORDER BY id DESC LIMIT ?
+	)`, alertId, alertId, maxSavedHistoryPosts); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ResetAlert clears all prior posts and makes an owned alert immediately due.
@@ -245,7 +276,7 @@ func (db *DB) ResetAlert(chatId, alertId int64) error {
 	}
 	defer tx.Rollback()
 
-	if err := requireAffected(tx.Exec(`UPDATE alerts SET last_time_checked = 0 WHERE chat_id = ? AND id = ?`, chatId, alertId)); err != nil {
+	if err := requireAffected(tx.Exec(`UPDATE alerts SET last_time_checked = 0, watch_state = '{}' WHERE chat_id = ? AND id = ?`, chatId, alertId)); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM seen_posts WHERE alert_id = ?`, alertId); err != nil {

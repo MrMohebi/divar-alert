@@ -153,3 +153,83 @@ func TestDeleteAlertCascadesStoredPosts(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoryRetention(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		name := "append"
+		if legacy {
+			name = "reopen legacy history"
+		}
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "retention.db")
+			database, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { database.Close() }()
+			for _, id := range []int64{1, 2} {
+				if err := database.InsertAlert(Alert{Id: id, ChatId: 2, Title: "cars", Link: "curl", Interval: 60}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := database.InsertPost("old-delivery", 1, nil, 1); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 65; i++ {
+				if legacy {
+					_, err = database.conn.Exec(`INSERT INTO alert_history (alert_id, data, created_at) VALUES (1, ?, 1)`, i)
+				} else {
+					err = database.AppendHistory(1, i)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if i < 7 {
+					if err := database.AppendHistory(2, i); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if !legacy {
+				var stored int
+				if err := database.conn.QueryRow(`SELECT COUNT(*) FROM alert_history WHERE alert_id = 1`).Scan(&stored); err != nil {
+					t.Fatal(err)
+				}
+				if stored != 50 {
+					t.Fatalf("stored history before restart = %d; want 50", stored)
+				}
+			}
+			if err := database.Close(); err != nil {
+				t.Fatal(err)
+			}
+			database, err = Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, check := range []struct {
+				id           int64
+				count, first int
+			}{{1, 50, 15}, {2, 7, 0}} {
+				history, err := database.LoadHistory(check.id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var stored int
+				if err := database.conn.QueryRow(`SELECT COUNT(*) FROM alert_history WHERE alert_id = ?`, check.id).Scan(&stored); err != nil {
+					t.Fatal(err)
+				}
+				if stored != check.count || len(history) != check.count {
+					t.Fatalf("alert %d: stored=%d, loaded=%d; want %d", check.id, stored, len(history), check.count)
+				}
+				for i, post := range history {
+					if post != float64(check.first+i) {
+						t.Fatalf("alert %d history[%d] = %v; want %d", check.id, i, post, check.first+i)
+					}
+				}
+			}
+			if exists, err := database.PostExists("old-delivery", 1); err != nil || !exists {
+				t.Fatalf("delivery deduplication lost: exists=%t err=%v", exists, err)
+			}
+		})
+	}
+}

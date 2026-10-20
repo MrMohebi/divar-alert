@@ -18,7 +18,7 @@ func TestEvaluatePostUsesCustomAnalysisPrompt(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
-		return jsonResponse(`{"choices":[{"message":{"content":"{\"score\":91,\"decision\":\"Buy\",\"explanation\":\"Matches the requested condition.\"}"}}]}`), nil
+		return jsonResponse(`{"choices":[{"message":{"content":"{\"score\":91,\"decision\":\"خرید مناسب\",\"explanation\":\"با شرایط درخواست‌شده هماهنگ است.\"}"}}]}`), nil
 	})}
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", "https://example.test/")
@@ -32,7 +32,7 @@ func TestEvaluatePostUsesCustomAnalysisPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvaluatePost() error = %v", err)
 	}
-	if result.Score != 91 || result.Decision != "Buy" {
+	if result.Score != 91 || result.Decision != "خرید مناسب" {
 		t.Fatalf("EvaluatePost() = %#v", result)
 	}
 	if len(received.Messages) != 2 || received.Messages[0].Role != "system" || received.Messages[1].Role != "user" {
@@ -50,7 +50,7 @@ func TestEvaluatePostUsesRentalDefaultForLegacyAlert(t *testing.T) {
 	var received OpenAIRequest
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		_ = json.NewDecoder(r.Body).Decode(&received)
-		return jsonResponse(`{"choices":[{"message":{"content":"{\"score\":80,\"price_score\":85,\"location_score\":70,\"features_score\":75,\"decision\":\"Worth Renting\",\"explanation\":\"Good value.\"}"}}]}`), nil
+		return jsonResponse(`{"choices":[{"message":{"content":"{\"score\":80,\"price_score\":85,\"location_score\":70,\"features_score\":75,\"decision\":\"مناسب اجاره\",\"explanation\":\"قیمت مناسبی دارد.\"}"}}]}`), nil
 	})}
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", "https://example.test")

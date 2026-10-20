@@ -9,12 +9,13 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/mrmohebi/divar-alert/conversation"
 	"github.com/mrmohebi/divar-alert/db"
 )
 
 const welcomeText = `ربات اعلان دیوار
 
-برای ساخت اعلان جدید از «اعلان جدید» استفاده کنید. برای مدیریت اعلان‌ها و روشن یا خاموش کردن تحلیل هوش مصنوعی، «اعلان‌های من» را انتخاب کنید.
+خواسته‌ات را با اسم شهر بنویس تا اعلانش را بسازیم. از «اعلان جدید» هم می‌توانی شروع کنی. برای مدیریت اعلان‌ها و روشن یا خاموش کردن تحلیل هوش مصنوعی، «اعلان‌های من» را انتخاب کنید.
 
 در هر مرحله می‌توانید /cancel را ارسال کنید.`
 
@@ -33,6 +34,10 @@ func configureBotCommands(ctx context.Context, b *bot.Bot) {
 
 func handlerStart(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil {
+		return
+	}
+	if draft, _, err := loadDraft(update.Message.Chat.ID); err == nil && draft != nil {
+		sendDraft(ctx, b, update.Message.Chat.ID, draft)
 		return
 	}
 	sendMessage(ctx, b, update.Message.Chat.ID, welcomeText, mainMenuKeyboard())
@@ -58,13 +63,7 @@ func handlerAlertSet(ctx context.Context, b *bot.Bot, update *models.Update) {
 }
 
 func startAlertProcess(ctx context.Context, b *bot.Bot, chatID int64) {
-	process, err := ProcessStart(ProcessKey.SetAlert, chatID, database)
-	if err != nil {
-		sugar.Errorw("Failed to start alert process", "error", err)
-		sendMessage(ctx, b, chatID, "شروع ساخت اعلان ممکن نشد. دوباره تلاش کنید.", nil)
-		return
-	}
-	sendProcessStep(ctx, b, process)
+	startNaturalAlert(ctx, b, chatID)
 }
 
 func handlerAlertList(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -76,6 +75,23 @@ func handlerAlertList(ctx context.Context, b *bot.Bot, update *models.Update) {
 
 func handlerDefault(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil || update.Message.Text == "" {
+		return
+	}
+	if update.Message.Chat.Type != "private" {
+		sendMessage(ctx, b, update.Message.Chat.ID, "برای ساخت اعلان، در گفت‌وگوی خصوصی پیام بده.", nil)
+		return
+	}
+	stored, loadErr := database.GetProcess(update.Message.Chat.ID)
+	if loadErr != nil {
+		sendMessage(ctx, b, update.Message.Chat.ID, "خواندن گفت‌وگو ممکن نشد؛ کمی بعد دوباره تلاش کن.", nil)
+		return
+	}
+	if stored == nil || stored.ProcessKey == conversation.ProcessKey {
+		if strings.HasPrefix(update.Message.Text, "/") {
+			sendMessage(ctx, b, update.Message.Chat.ID, "خواسته‌ات را بنویس یا از منو یک گزینه انتخاب کن.", mainMenuKeyboard())
+			return
+		}
+		handleNaturalText(ctx, b, update.Message.Chat.ID, update.Message.Text)
 		return
 	}
 	_, process, err := CurrentProcess(update.Message.Chat.ID, database)
@@ -418,7 +434,7 @@ func renderAlertList(alerts []db.Alert) (string, *models.InlineKeyboardMarkup) {
 		}
 		fmt.Fprintf(&text, "\n%d. %s\nهر %d ثانیه | تحلیل هوش مصنوعی: %s\n", index+1, alert.Title, alert.Interval, aiStatus)
 		keyboard = append(keyboard, []models.InlineKeyboardButton{
-			{Text: "AI: " + aiStatus, CallbackData: fmt.Sprintf("toggle_ai-%d-%t", alert.Id, !alert.AIEnabled)},
+			{Text: "تحلیل: " + aiStatus, CallbackData: fmt.Sprintf("toggle_ai-%d-%t", alert.Id, !alert.AIEnabled)},
 			{Text: "تازه‌سازی", CallbackData: "reset_alert-" + strconv.FormatInt(alert.Id, 10)},
 		})
 		keyboard = append(keyboard, []models.InlineKeyboardButton{
