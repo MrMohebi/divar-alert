@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -37,7 +39,7 @@ func main() {
 	defer logger.Sync()
 
 	err := godotenv.Load()
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		sugar.Warn("Error loading .env file")
 	}
 
@@ -180,7 +182,7 @@ func runAlertPoller(ctx context.Context) (panicked bool) {
 			res, err := divar.Search(alert.Link)
 			if err != nil {
 				sugar.Errorw("Failed to search for alert", "error", err, "alert", alert.Title)
-				if updateErr := database.UpdateAlertLastChecked(alert.Id, time.Now().Unix()); updateErr != nil {
+				if updateErr := database.UpdateAlertLastCheckedForGeneration(alert.Id, alert.Generation, time.Now().Unix()); updateErr != nil {
 					sugar.Errorw("Failed to update last time checked", "error", updateErr, "alert", alert.Title)
 				}
 				continue
@@ -191,85 +193,94 @@ func runAlertPoller(ctx context.Context) (panicked bool) {
 				slices.Reverse(res.ListWidgets)
 
 				for _, post := range res.ListWidgets {
-					// check if post is already in database
-					exists, err := database.PostExists(post.Data.Token, alert.Id)
-					if err != nil {
-						sugar.Errorw("Failed to check post existence", "error", err, "post", post.Data.Title)
-						continue
-					}
+					err := database.WithActiveAlert(alert, func() error {
+						// check if post is already in database
+						exists, err := database.PostExists(post.Data.Token, alert.Id)
+						if err != nil {
+							sugar.Errorw("Failed to check post existence", "error", err, "post", post.Data.Title)
+							return err
+						}
 
-					if !exists {
-						var evaluation *ai.EvaluationResult
-						var importantData divar.PostImportantData
-						if alert.AIEnabled {
-							postDetail, err := divar.GetPostContext(ctx, post.Data.Token)
-							if err != nil {
-								sugar.Errorw("Failed to get post details", "error", err, "token", post.Data.Token)
-							} else {
-
-								importantData = divar.ExtractImportantData(postDetail)
-								postHistory, historyErr := database.LoadHistory(alert.Id)
-								if historyErr != nil {
-									sugar.Errorw("Failed to load post history", "error", historyErr, "alert", alert.Title)
-									postHistory = []interface{}{}
-								}
-
-								evaluation, err = ai.EvaluatePost(ctx, importantData, postHistory, alert.AnalysisPrompt)
+						if !exists {
+							var evaluation *ai.EvaluationResult
+							var importantData divar.PostImportantData
+							if alert.AIEnabled {
+								postDetail, err := divar.GetPostContext(ctx, post.Data.Token)
 								if err != nil {
-									sugar.Errorw("Failed to analyze post with AI", "error", err, "post", post.Data.Title)
-									evaluation = nil
+									sugar.Errorw("Failed to get post details", "error", err, "token", post.Data.Token)
+								} else {
+
+									importantData = divar.ExtractImportantData(postDetail)
+									postHistory, historyErr := database.LoadHistory(alert.Id)
+									if historyErr != nil {
+										sugar.Errorw("Failed to load post history", "error", historyErr, "alert", alert.Title)
+										postHistory = []interface{}{}
+									}
+
+									evaluation, err = ai.EvaluatePost(ctx, importantData, postHistory, alert.AnalysisPrompt)
+									if err != nil {
+										sugar.Errorw("Failed to analyze post with AI", "error", err, "post", post.Data.Title)
+										evaluation = nil
+									}
+								}
+							}
+
+							// Step 5: Prepare notification message
+							text := "پست جدید برای: " + alert.Title + "\n\n"
+							text += post.Data.Title + "\n"
+							text += post.Data.TopDescriptionText + "\n"
+							text += post.Data.BottomDescriptionText + "\n"
+							text += post.Data.MiddleDescriptionText + "\n\n"
+
+							// Add AI evaluation if available
+							if evaluation != nil {
+								text += "━━━━━━━━━━━━━━━━━━\n"
+								text += "🤖 تحلیل آگهی:\n"
+								text += fmt.Sprintf("امتیاز: %d از ۱۰۰\n", evaluation.Score)
+								if evaluation.PriceScore > 0 {
+									text += fmt.Sprintf("امتیاز قیمت: %d از ۱۰۰\n", evaluation.PriceScore)
+								}
+								if evaluation.LocationScore > 0 {
+									text += fmt.Sprintf("امتیاز موقعیت: %d از ۱۰۰\n", evaluation.LocationScore)
+								}
+								if evaluation.FeaturesScore > 0 {
+									text += fmt.Sprintf("امتیاز امکانات: %d از ۱۰۰\n", evaluation.FeaturesScore)
+								}
+								text += fmt.Sprintf("پیشنهاد: %s\n", evaluation.Decision)
+								text += fmt.Sprintf("توضیح: %s\n\n", evaluation.Explanation)
+							}
+
+							if alert.AIEnabled && evaluation == nil {
+								text += "تحلیل آگهی فعلاً در دسترس نیست؛ آگهی را بدون امتیاز می‌فرستم.\n\n"
+							}
+							text += fmt.Sprintf("https://divar.ir/v/%s", post.Data.Token)
+
+							// Step 6: Send the notification before recording the post as delivered.
+							err = sendPostNotification(ctx, alert.ChatId, post.Data.ImageURL, text)
+							if err != nil {
+								sugar.Errorw("Failed to notify user", "error", err, "alert", alert.Title)
+								return err
+							}
+
+							// Step 7: Record successful delivery so failed sends can be retried.
+							err = database.InsertPost(post.Data.Token, alert.Id, post, time.Now().Unix())
+							if err != nil {
+								sugar.Errorw("Failed to save delivered post", "error", err, "post", post.Data.Title)
+								return err
+							}
+
+							if alert.AIEnabled && importantData.Token != "" {
+								if err := database.AppendHistory(alert.Id, importantData); err != nil {
+									sugar.Errorw("Failed to save post to history", "error", err, "post", post.Data.Title)
 								}
 							}
 						}
-
-						// Step 5: Prepare notification message
-						text := "پست جدید برای: " + alert.Title + "\n\n"
-						text += post.Data.Title + "\n"
-						text += post.Data.TopDescriptionText + "\n"
-						text += post.Data.BottomDescriptionText + "\n"
-						text += post.Data.MiddleDescriptionText + "\n\n"
-
-						// Add AI evaluation if available
-						if evaluation != nil {
-							text += "━━━━━━━━━━━━━━━━━━\n"
-							text += "🤖 تحلیل آگهی:\n"
-							text += fmt.Sprintf("امتیاز: %d از ۱۰۰\n", evaluation.Score)
-							if evaluation.PriceScore > 0 {
-								text += fmt.Sprintf("امتیاز قیمت: %d از ۱۰۰\n", evaluation.PriceScore)
-							}
-							if evaluation.LocationScore > 0 {
-								text += fmt.Sprintf("امتیاز موقعیت: %d از ۱۰۰\n", evaluation.LocationScore)
-							}
-							if evaluation.FeaturesScore > 0 {
-								text += fmt.Sprintf("امتیاز امکانات: %d از ۱۰۰\n", evaluation.FeaturesScore)
-							}
-							text += fmt.Sprintf("پیشنهاد: %s\n", evaluation.Decision)
-							text += fmt.Sprintf("توضیح: %s\n\n", evaluation.Explanation)
-						}
-
-						if alert.AIEnabled && evaluation == nil {
-							text += "تحلیل آگهی فعلاً در دسترس نیست؛ آگهی را بدون امتیاز می‌فرستم.\n\n"
-						}
-						text += fmt.Sprintf("https://divar.ir/v/%s", post.Data.Token)
-
-						// Step 6: Send the notification before recording the post as delivered.
-						err = sendPostNotification(ctx, alert.ChatId, post.Data.ImageURL, text)
-						if err != nil {
-							sugar.Errorw("Failed to notify user", "error", err, "alert", alert.Title)
-							continue
-						}
-
-						// Step 7: Record successful delivery so failed sends can be retried.
-						err = database.InsertPost(post.Data.Token, alert.Id, post, time.Now().Unix())
-						if err != nil {
-							sugar.Errorw("Failed to save delivered post", "error", err, "post", post.Data.Title)
-							continue
-						}
-
-						if alert.AIEnabled && importantData.Token != "" {
-							if err := database.AppendHistory(alert.Id, importantData); err != nil {
-								sugar.Errorw("Failed to save post to history", "error", err, "post", post.Data.Title)
-							}
+						return nil
+					})
+					if err != nil {
+						sugar.Warnw("Legacy delivery stopped", "alert_id", alert.Id, "error", err)
+						if errors.Is(err, sql.ErrNoRows) {
+							break
 						}
 					}
 				}
@@ -278,7 +289,7 @@ func runAlertPoller(ctx context.Context) (panicked bool) {
 			}
 
 			// Update last time checked
-			err = database.UpdateAlertLastChecked(alert.Id, time.Now().Unix())
+			err = database.UpdateAlertLastCheckedForGeneration(alert.Id, alert.Generation, time.Now().Unix())
 			if err != nil {
 				sugar.Errorw("Failed to update last time checked for alert", "error", err, "alert", alert.Title)
 			}

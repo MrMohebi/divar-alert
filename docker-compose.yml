@@ -1,13 +1,11 @@
 services:
   app:
-#    build: .
-    image: ghcr.io/mrmohebi/divar-alert:latest
+    image: ghcr.io/mrmohebi/divar-alert:${DIVAR_IMAGE_TAG:?Set DIVAR_IMAGE_TAG to a published image tag}
     container_name: divar-alert-bot
     restart: unless-stopped
+    stop_grace_period: 60s
+    env_file: .env
     environment:
-      - TELEGRAM_BOT_TOKEN=
-      - TELEGRAM_API_URL=https://tapi.bale.ai
-      - DB_PATH=/root/app/data/divar-alert.db
-      - POLL_INTERVAL_SECONDS=1
+      DB_PATH: /root/app/data/divar-alert.db
     volumes:
       - ./data:/root/app/data

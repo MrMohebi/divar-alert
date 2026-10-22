@@ -34,6 +34,8 @@ func (db *DB) migrateAlerts() error {
 	for _, column := range []struct{ name, definition string }{
 		{"search_query", `TEXT NOT NULL DEFAULT '' CHECK(search_query = '' OR json_valid(search_query))`},
 		{"original_prompt", `TEXT NOT NULL DEFAULT ''`},
+		{"deleted_at", `INTEGER`},
+		{"generation", `INTEGER NOT NULL DEFAULT 0`},
 		{"watch_state", `TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(watch_state))`},
 	} {
 		if !names[column.name] {
@@ -78,5 +80,5 @@ func (db *DB) ConfirmDraft(chatID int64, key, expected string, alert Alert) erro
 }
 
 func (db *DB) UpdateWatchState(alertID int64, state string, lastChecked int64) error {
-	return requireAffected(db.conn.Exec(`UPDATE alerts SET watch_state=?,last_time_checked=? WHERE id=?`, state, lastChecked, alertID))
+	return requireAffected(db.conn.Exec(`UPDATE alerts SET watch_state=?,last_time_checked=? WHERE id=? AND deleted_at IS NULL`, state, lastChecked, alertID))
 }

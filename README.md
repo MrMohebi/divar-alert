@@ -31,19 +31,85 @@ This project is a bot designed to monitor your filters on [Divar](https://divar.
   POLL_INTERVAL_SECONDS=<Seconds between scheduler scans; default 1>
   ```
 
-### Running with Docker
-1. Build the Docker image:
-   ```bash
-   docker build -t divar-alert-bot .
+### Deploying a published Docker image (Linux x86-64)
+
+1. Publish this version through **Actions → Publish image to GHCR → Run workflow**,
+   selecting the branch containing your changes (for example, `fully-ai`). A
+   manual run publishes `ghcr.io/mrmohebi/divar-alert:sha-<full-commit>` without
+   changing `latest`. Publishing a GitHub release also publishes its release tag;
+   only stable releases update `latest`. The workflow tests the code before
+   publishing and records the resulting tags and digest in its run summary.
+   GitHub requires the workflow file to exist on the default branch for manual
+   dispatch; if GitHub does not offer this workflow, merge the workflow change
+   into the default branch first, then select the desired branch when running it.
+
+2. Put `docker-compose.yml` and a private `.env` file on the server. Start from
+   `.env.example` and configure:
+   ```env
+   DIVAR_IMAGE_TAG=sha-<full-commit-from-the-successful-workflow>
+   TELEGRAM_BOT_TOKEN=<your-token>
+   TELEGRAM_API_URL=https://tapi.bale.ai
+   POLL_INTERVAL_SECONDS=1
+   OPENAI_API_KEY=<your-key>
+   OPENAI_BASE_URL=https://api.openai.com/v1
+   OPENAI_MODEL=gpt-4o-mini
    ```
-2. Run the container:
+   Use `https://api.telegram.org` for Telegram. Keep a custom AI base URL/model if
+   your provider requires it. Conversational alert setup needs the AI key.
+   Compose loads `.env` into the container and sets
+   `DB_PATH=/root/app/data/divar-alert.db`, overriding any native path in `.env`.
+   Do not paste resolved `docker compose config` output into logs or tickets;
+   it includes credentials. No inbound ports are needed.
+
+3. Stop any other instance using the same bot token before starting this one.
+   Create `data/` and preserve any existing SQLite database there. Before the
+   first migration or an upgrade, stop the bot and back up the whole directory,
+   including any SQLite WAL files:
    ```bash
    mkdir -p data
-   docker run -d --name divar-alert-bot --env-file .env \
-     -v "$PWD/data:/root/app/data" divar-alert-bot
+   docker compose stop
+   tar -czf "divar-data-$(date -u +%Y%m%dT%H%M%SZ).tar.gz" data
    ```
+   For an initial deployment, omit `docker compose stop` if no container exists.
+   Native instances must also be stopped before backing up their database.
 
-You can also set the token in `docker-compose.yml` and run `docker compose up -d`.
+4. Pull and verify the image against the digest recorded by the workflow:
+   ```bash
+   docker compose pull
+   docker image inspect "ghcr.io/mrmohebi/divar-alert:$DIVAR_IMAGE_TAG" \
+     --format '{{json .RepoDigests}} {{index .Config.Labels "org.opencontainers.image.revision"}}'
+   docker compose up -d --no-build
+   docker compose ps
+   docker compose logs --tail=100 -f
+   ```
+   In the inspection command, set the shell variable `DIVAR_IMAGE_TAG` to the
+   same published tag you put in `.env`. Public packages can be pulled without
+   login; private packages require `docker login ghcr.io` with read access.
+
+For upgrades, stop and back up first, change `DIVAR_IMAGE_TAG` to the tested
+version, then pull and recreate with the same commands. Keep one running bot
+instance and one writable database. Existing SQLite alerts migrate automatically;
+older DuckDB files are not compatible. To roll back a schema-changing upgrade,
+restore its pre-upgrade backup with the bot stopped and use the previous image.
+
+### Building and checking the image locally
+
+```bash
+docker build --platform linux/amd64 -t divar-alert:deployment-check .
+python3 scripts/docker-smoke.py divar-alert:deployment-check
+```
+
+The Linux smoke test uses a local mock bot API, disposable data, and fake
+credentials. It checks Compose configuration, startup, embedded catalogs, CA
+certificates, legacy SQLite migration, persistence across container recreation,
+and graceful shutdown. It sends no real chat messages.
+
+To run a local build yourself, use the same persistent database path:
+```bash
+docker run -d --name divar-alert-bot --env-file .env \
+  -e DB_PATH=/root/app/data/divar-alert.db \
+  -v "$PWD/data:/root/app/data" divar-alert:deployment-check
+```
 
 ### Running Natively
 1. Clone the repository:
@@ -227,7 +293,7 @@ separate from the search server payload.
 - **Features**:
     - Displays the title and interval of each alert.
     - Provides inline buttons to enable or disable AI analysis per alert.
-    - Provides a confirmed fresh-start action that clears delivered-post and AI history.
+    - Provides a confirmed fresh-start action that resets delivery deduplication and AI history while retaining delivery audit records.
     - Provides a confirmed delete action for each alert.
 
 ### `/cancel`
@@ -276,9 +342,11 @@ AI analysis is optional for each alert. When enabled, the bot uses OpenAI to ana
 
 ### History Storage
 
-Post history is stored in the SQLite database configured by `DB_PATH`. History is restored after restart and deleted automatically with its alert. The **Fresh Start** button clears AI history, delivered-post tokens, and scan state. Conversational alerts start again with up to three current listings; legacy curl alerts retain their existing fresh-start behavior.
+Post history is stored in the SQLite database configured by `DB_PATH`. History is restored after restart and limited to the latest 50 ads per alert; each AI evaluation uses at most 20 previous ads. Deleting an alert soft-deletes its configuration and stops monitoring while preserving its stored data. The **Fresh Start** button clears AI history and scan state, and retires active delivery deduplication records without erasing them. Conversational alerts start again with up to three current listings; legacy curl alerts retain their existing fresh-start behavior.
 
 ### Migrating From DuckDB
+
+Successful delivery records retain their row ID, alert ID, listing token, payload, and timestamp. Fresh Start marks old delivery records with `deleted_at`, allowing a resend to create a new audit row. Deleted alerts retain their owning chat ID, so delivery records remain attributable to users. No charging, quota enforcement, or AI-token accounting is implemented. These records preserve the current at-least-once delivery behavior, not an exactly-once billing ledger. Temporary conversation state and capped AI history still use physical cleanup.
 
 SQLite and DuckDB files are not interchangeable. Set `DB_PATH` to a new file such as `./data/divar-alert.db`; do not point it at the previous `db.badger` file. Keep the old file as a backup if you need its data for a separate one-time migration.
 
@@ -309,6 +377,7 @@ You can customize the AI behavior by:
 |---------------------|--------------------------------------------------|
 | `TELEGRAM_BOT_TOKEN`| The token for your Telegram or Bale bot.         |
 | `TELEGRAM_API_URL`  | The API URL for Telegram or Bale.                |
+| `DIVAR_IMAGE_TAG`  | Required by Docker Compose: a published release tag or `sha-<full-commit>`. |
 | `DB_PATH`           | The path to the SQLite database file.            |
 | `POLL_INTERVAL_SECONDS` | Scheduler scan interval from 1 to 3600 seconds. Default: `1` |
 | `OPENAI_API_KEY`    | Required for conversational setup; also used for optional per-listing commentary. Existing alerts continue monitoring if AI is unavailable. |

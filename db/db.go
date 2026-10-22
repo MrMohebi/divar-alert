@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -14,7 +15,8 @@ import (
 
 // DB wraps the SQLite connection.
 type DB struct {
-	conn *sql.DB
+	conn      *sql.DB
+	lifecycle sync.Map
 }
 
 const maxSavedHistoryPosts = 50
@@ -85,12 +87,13 @@ func (db *DB) createTables() error {
 		CREATE INDEX IF NOT EXISTS idx_alerts_chat_id ON alerts(chat_id);
 
 		CREATE TABLE IF NOT EXISTS seen_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
 			token TEXT NOT NULL,
 			alert_id INTEGER NOT NULL,
 			data TEXT CHECK(data IS NULL OR json_valid(data)),
 			created_at INTEGER NOT NULL,
-			PRIMARY KEY (token, alert_id),
-			FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+            deleted_at INTEGER,
+			FOREIGN KEY (alert_id) REFERENCES alerts(id)
 		);
 
 		CREATE TABLE IF NOT EXISTS alert_history (
@@ -112,7 +115,10 @@ func (db *DB) createTables() error {
 	if err != nil {
 		return err
 	}
-	return db.migrateAlerts()
+	if err := db.migrateAlerts(); err != nil {
+		return err
+	}
+	return db.migrateDeliveries()
 }
 
 // Alert represents an alert configuration.
@@ -128,17 +134,19 @@ type Alert struct {
 	SearchQuery     string `json:"searchQuery,omitempty"`
 	OriginalPrompt  string `json:"originalPrompt,omitempty"`
 	WatchState      string `json:"watchState,omitempty"`
+	DeletedAt       *int64 `json:"deletedAt,omitempty"`
+	Generation      int64  `json:"generation"`
 }
 
 const selectAlerts = `
-	SELECT id, chat_id, title, link, ai_enabled, analysis_prompt, interval_seconds, last_time_checked, search_query, original_prompt, watch_state
+	SELECT id, chat_id, title, link, ai_enabled, analysis_prompt, interval_seconds, last_time_checked, search_query, original_prompt, watch_state, deleted_at, generation
 	FROM alerts`
 
 func scanAlerts(rows *sql.Rows) ([]Alert, error) {
 	var alerts []Alert
 	for rows.Next() {
 		var alert Alert
-		if err := rows.Scan(&alert.Id, &alert.ChatId, &alert.Title, &alert.Link, &alert.AIEnabled, &alert.AnalysisPrompt, &alert.Interval, &alert.LastTimeChecked, &alert.SearchQuery, &alert.OriginalPrompt, &alert.WatchState); err != nil {
+		if err := rows.Scan(&alert.Id, &alert.ChatId, &alert.Title, &alert.Link, &alert.AIEnabled, &alert.AnalysisPrompt, &alert.Interval, &alert.LastTimeChecked, &alert.SearchQuery, &alert.OriginalPrompt, &alert.WatchState, &alert.DeletedAt, &alert.Generation); err != nil {
 			return nil, err
 		}
 		alerts = append(alerts, alert)
@@ -147,7 +155,7 @@ func scanAlerts(rows *sql.Rows) ([]Alert, error) {
 }
 
 func (db *DB) GetAllAlerts() ([]Alert, error) {
-	rows, err := db.conn.Query(selectAlerts)
+	rows, err := db.conn.Query(selectAlerts + ` WHERE deleted_at IS NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +164,7 @@ func (db *DB) GetAllAlerts() ([]Alert, error) {
 }
 
 func (db *DB) GetAlertsByChatId(chatId int64) ([]Alert, error) {
-	rows, err := db.conn.Query(selectAlerts+` WHERE chat_id = ?`, chatId)
+	rows, err := db.conn.Query(selectAlerts+` WHERE chat_id = ? AND deleted_at IS NULL`, chatId)
 	if err != nil {
 		return nil, err
 	}
@@ -173,15 +181,18 @@ func (db *DB) InsertAlert(alert Alert) error {
 }
 
 func (db *DB) UpdateAlertAIEnabled(chatId, alertId int64, enabled bool) error {
-	return requireAffected(db.conn.Exec(`UPDATE alerts SET ai_enabled = ? WHERE chat_id = ? AND id = ?`, enabled, chatId, alertId))
+	return requireAffected(db.conn.Exec(`UPDATE alerts SET ai_enabled = ? WHERE chat_id = ? AND id = ? AND deleted_at IS NULL`, enabled, chatId, alertId))
 }
 
 func (db *DB) UpdateAlertAnalysis(chatId, alertId int64, prompt string) error {
-	return requireAffected(db.conn.Exec(`UPDATE alerts SET ai_enabled = true, analysis_prompt = ? WHERE chat_id = ? AND id = ?`, prompt, chatId, alertId))
+	return requireAffected(db.conn.Exec(`UPDATE alerts SET ai_enabled = true, analysis_prompt = ? WHERE chat_id = ? AND id = ? AND deleted_at IS NULL`, prompt, chatId, alertId))
 }
 
 func (db *DB) DeleteAlert(chatId, alertId int64) error {
-	return requireAffected(db.conn.Exec(`DELETE FROM alerts WHERE chat_id = ? AND id = ?`, chatId, alertId))
+	lock := db.alertLock(alertId)
+	lock.Lock()
+	defer lock.Unlock()
+	return requireAffected(db.conn.Exec(`UPDATE alerts SET deleted_at = ? WHERE chat_id = ? AND id = ? AND deleted_at IS NULL`, time.Now().Unix(), chatId, alertId))
 }
 
 func requireAffected(result sql.Result, err error) error {
@@ -199,13 +210,12 @@ func requireAffected(result sql.Result, err error) error {
 }
 
 func (db *DB) UpdateAlertLastChecked(alertId, lastTimeChecked int64) error {
-	_, err := db.conn.Exec(`UPDATE alerts SET last_time_checked = ? WHERE id = ?`, lastTimeChecked, alertId)
-	return err
+	return requireAffected(db.conn.Exec(`UPDATE alerts SET last_time_checked = ? WHERE id = ? AND deleted_at IS NULL`, lastTimeChecked, alertId))
 }
 
 func (db *DB) PostExists(token string, alertId int64) (bool, error) {
 	var exists bool
-	err := db.conn.QueryRow(`SELECT EXISTS(SELECT 1 FROM seen_posts WHERE token = ? AND alert_id = ?)`, token, alertId).Scan(&exists)
+	err := db.conn.QueryRow(`SELECT EXISTS(SELECT 1 FROM seen_posts WHERE token = ? AND alert_id = ? AND deleted_at IS NULL)`, token, alertId).Scan(&exists)
 	return exists, err
 }
 
@@ -268,18 +278,21 @@ func (db *DB) AppendHistory(alertId int64, post interface{}) error {
 	return tx.Commit()
 }
 
-// ResetAlert clears all prior posts and makes an owned alert immediately due.
+// ResetAlert retires delivery deduplication, clears AI context, and starts a new scan generation.
 func (db *DB) ResetAlert(chatId, alertId int64) error {
+	lock := db.alertLock(alertId)
+	lock.Lock()
+	defer lock.Unlock()
 	tx, err := db.conn.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	if err := requireAffected(tx.Exec(`UPDATE alerts SET last_time_checked = 0, watch_state = '{}' WHERE chat_id = ? AND id = ?`, chatId, alertId)); err != nil {
+	if err := requireAffected(tx.Exec(`UPDATE alerts SET last_time_checked = 0, watch_state = '{}', generation = generation + 1 WHERE chat_id = ? AND id = ? AND deleted_at IS NULL`, chatId, alertId)); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM seen_posts WHERE alert_id = ?`, alertId); err != nil {
+	if _, err := tx.Exec(`UPDATE seen_posts SET deleted_at = ? WHERE alert_id = ? AND deleted_at IS NULL`, time.Now().Unix(), alertId); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM alert_history WHERE alert_id = ?`, alertId); err != nil {

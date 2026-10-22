@@ -24,6 +24,7 @@ type WatchState struct {
 }
 
 type structuredWatcher struct {
+	Guard  func(db.Alert, func() error) error
 	Search func(context.Context, divar.SearchQuery) (divar.SearchPage, error)
 	Notify func(context.Context, db.Alert, divar.Listing) error
 	Seen   func(string, int64) (bool, error)
@@ -68,7 +69,13 @@ func launchStructuredPoll(ctx context.Context, alert db.Alert) {
 }
 
 func pollStructuredAlert(ctx context.Context, alert db.Alert) error {
-	return (structuredWatcher{divar.SearchWithQuery, notifyStructuredListing, database.PostExists, database.InsertPost, database.UpdateWatchState}).Poll(ctx, alert)
+	return (structuredWatcher{
+		Search: divar.SearchWithQuery, Notify: notifyStructuredListing, Seen: database.PostExists, Record: database.InsertPost,
+		Guard: database.WithActiveAlert,
+		Save: func(id int64, state string, checked int64) error {
+			return database.UpdateWatchStateForGeneration(id, alert.Generation, state, checked)
+		},
+	}).Poll(ctx, alert)
 }
 
 func (w structuredWatcher) Poll(ctx context.Context, alert db.Alert) (pollErr error) {
@@ -100,17 +107,23 @@ func (w structuredWatcher) Poll(ctx context.Context, alert db.Alert) (pollErr er
 		}
 	}()
 	deliver := func(post divar.Listing) error {
-		seen, err := w.Seen(post.Token, alert.Id)
-		if err != nil {
-			return err
+		commit := func() error {
+			seen, err := w.Seen(post.Token, alert.Id)
+			if err != nil {
+				return err
+			}
+			if seen {
+				return nil
+			}
+			if err = w.Notify(ctx, alert, post); err != nil {
+				return err
+			}
+			return w.Record(post.Token, alert.Id, post, time.Now().Unix())
 		}
-		if seen {
-			return nil
+		if w.Guard != nil {
+			return w.Guard(alert, commit)
 		}
-		if err = w.Notify(ctx, alert, post); err != nil {
-			return err
-		}
-		return w.Record(post.Token, alert.Id, post, time.Now().Unix())
+		return commit()
 	}
 	if !state.Initialized {
 		if !state.PreviewPrepared {

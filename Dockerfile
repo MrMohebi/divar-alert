@@ -7,11 +7,11 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /divar-alert .
 
 
-FROM alpine:3.17
+FROM alpine:3.24
 LABEL org.opencontainers.image.source="https://github.com/MrMohebi/divar-alert"
 
 WORKDIR /root/app
-RUN apk --no-cache add ca-certificates
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 COPY --from=builder --chmod=755 /divar-alert ./divar-alert
 

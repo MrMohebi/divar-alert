@@ -130,7 +130,7 @@ func TestResetAlertClearsHistoryAndSeenPosts(t *testing.T) {
 	}
 }
 
-func TestDeleteAlertCascadesStoredPosts(t *testing.T) {
+func TestDeleteAlertRetainsStoredPosts(t *testing.T) {
 	database := openTestDB(t, "delete")
 	alert := Alert{Id: 1, ChatId: 2, Title: "cars", Link: "curl", Interval: 60}
 	if err := database.InsertAlert(alert); err != nil {
@@ -148,7 +148,7 @@ func TestDeleteAlertCascadesStoredPosts(t *testing.T) {
 
 	for _, table := range []string{"seen_posts", "alert_history"} {
 		var count int
-		if err := database.conn.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != 0 {
+		if err := database.conn.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != 1 {
 			t.Fatalf("%s count = %d, error = %v", table, count, err)
 		}
 	}
