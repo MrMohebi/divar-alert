@@ -36,7 +36,10 @@ This project is a bot designed to monitor your filters on [Divar](https://divar.
 1. Publish this version through **Actions → Publish image to GHCR → Run workflow**,
    selecting the branch containing your changes (for example, `fully-ai`). A
    manual run publishes `ghcr.io/mrmohebi/divar-alert:sha-<full-commit>` without
-   changing `latest`. Publishing a GitHub release also publishes its release tag;
+   changing `latest`. To promote an already verified image without rebuilding,
+   run the same workflow with its `promote_digest` input set to the complete
+   `sha256:...` digest; the workflow verifies that `latest` resolves to that digest.
+   Publishing a GitHub release also publishes its release tag;
    only stable releases update `latest`. The workflow tests the code before
    publishing and records the resulting tags and digest in its run summary.
    GitHub requires the workflow file to exist on the default branch for manual
