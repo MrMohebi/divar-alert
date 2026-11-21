@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -28,8 +29,6 @@ var sugar *zap.SugaredLogger
 
 var database *db.DB
 
-var b *bot.Bot
-
 var alertPollInterval = time.Second
 
 func main() {
@@ -43,21 +42,24 @@ func main() {
 		sugar.Warn("Error loading .env file")
 	}
 
-	TelegramToken := os.Getenv("TELEGRAM_BOT_TOKEN")
-	TelegramApiUrl := os.Getenv("TELEGRAM_API_URL")
+	config, err := loadBotConfig(os.Getenv)
+	if err != nil {
+		sugar.Fatal(err)
+	}
 	DBPath := os.Getenv("DB_PATH")
 	alertPollInterval, err = parsePollInterval(os.Getenv("POLL_INTERVAL_SECONDS"))
 	if err != nil {
 		sugar.Fatal(err)
 	}
 
-	if TelegramApiUrl == "" || TelegramToken == "" || DBPath == "" {
-		sugar.Fatal("TELEGRAM_API_URL and TELEGRAM_BOT_TOKEN and DB_PATH must be set in .env file")
-	} else {
-		sugar.Infof("TELEGRAM_API_URL: %s", TelegramApiUrl)
-		sugar.Infof("DB_PATH: %s", DBPath)
-		sugar.Infof("POLL_INTERVAL_SECONDS: %g", alertPollInterval.Seconds())
+	if DBPath == "" {
+		sugar.Fatal("DB_PATH must be set in .env file")
 	}
+	for _, platform := range config.Platforms {
+		sugar.Infow("Messaging platform enabled", "platform", platform.Name, "api_url", platform.APIURL)
+	}
+	sugar.Infof("DB_PATH: %s", DBPath)
+	sugar.Infof("POLL_INTERVAL_SECONDS: %g", alertPollInterval.Seconds())
 
 	// ------------------ init db -----------------
 	database, err = db.Open(DBPath)
@@ -85,6 +87,10 @@ func main() {
 	//	sugar.Info("================================")
 	//}
 
+	if err := adoptLegacyChats(config.LegacyPlatform); err != nil {
+		sugar.Fatal(err)
+	}
+
 	conversationService, err = conversation.NewService()
 	if err != nil {
 		sugar.Fatalw("Failed to load embedded catalogs", "error", err)
@@ -94,8 +100,55 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	for _, platform := range config.Platforms {
+		b, err := newBot(ctx, platform)
+		if err != nil {
+			sugar.Fatalw("Failed to create bot", "platform", platform.Name, "error", err)
+		}
+		messengers = append(messengers, &messenger{platform: platform.Name, bot: b, db: database.ForPlatform(platform.Name)})
+	}
+
+	pollerDone := make(chan struct{})
+	go func() { defer close(pollerDone); checkForNewAlert(ctx) }()
+
+	var bots sync.WaitGroup
+	for _, m := range messengers {
+		bots.Add(1)
+		go func() { defer bots.Done(); m.bot.Start(ctx) }()
+	}
+	bots.Wait()
+	cancel()
+	<-pollerDone
+	watchJobs.Wait()
+}
+
+// adoptLegacyChats assigns alerts and drafts saved before platform support to
+// the platform whose bot created them.
+func adoptLegacyChats(platform string) error {
+	unscoped, err := database.CountUnscoped()
+	if err != nil || unscoped == 0 {
+		return err
+	}
+	if platform == "" {
+		return fmt.Errorf("found %d alerts or drafts saved before Telegram and Bale ran together; set EXISTING_ALERTS_PLATFORM to the platform (telegram or bale) that created them", unscoped)
+	}
+	adopted, err := database.AdoptUnscoped(platform)
+	if err != nil {
+		return fmt.Errorf("assign existing alerts to %s: %w", platform, err)
+	}
+	sugar.Infow("Assigned existing alerts and drafts to platform", "platform", platform, "rows", adopted)
+	return nil
+}
+
+func newBot(ctx context.Context, platform platformConfig) (*bot.Bot, error) {
 	opts := []bot.Option{
-		bot.WithServerURL(TelegramApiUrl),
+		bot.WithServerURL(platform.APIURL),
+		// Check the token below instead, so one unreachable platform does not
+		// stop the bot from starting on the other.
+		bot.WithSkipGetMe(),
+		bot.WithErrorsHandler(func(err error) {
+			sugar.Errorw("Bot update error", "platform", platform.Name, "error", err)
+		}),
 		bot.WithCallbackQueryDataHandler("draft:", bot.MatchTypePrefix, serialized(handlerCallbackDraft)),
 		bot.WithDefaultHandler(serialized(handlerDefault)),
 		bot.WithCallbackQueryDataHandler("delete_alert-", bot.MatchTypePrefix, serialized(handlerCallbackDeleteAlert)),
@@ -110,27 +163,32 @@ func main() {
 		bot.WithCallbackQueryDataHandler("menu_", bot.MatchTypePrefix, serialized(handlerCallbackMenu)),
 	}
 
-	b, err = bot.New(TelegramToken, opts...)
+	b, err := bot.New(platform.Token, opts...)
 	if err != nil {
-		sugar.Fatal(err)
+		return nil, err
+	}
+	if me, err := b.GetMe(ctx); err != nil {
+		sugar.Errorw("Bot token check failed; updates will be retried", "platform", platform.Name, "error", err)
+	} else {
+		sugar.Infow("Bot connected", "platform", platform.Name, "username", me.Username)
 	}
 	configureBotCommands(ctx, b)
 
-	pollerDone := make(chan struct{})
-	go func() { defer close(pollerDone); checkForNewAlert(ctx) }()
-
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact, serialized(handlerStart))
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/help", bot.MatchTypeExact, serialized(handlerStart))
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/cancel", bot.MatchTypeExact, serialized(handlerCancel))
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/alert_set", bot.MatchTypeExact, serialized(handlerAlertSet))
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/alerts", bot.MatchTypeExact, serialized(handlerAlertList))
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertSet", bot.MatchTypeExact, serialized(handlerAlertSet))
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/alertList", bot.MatchTypeExact, serialized(handlerAlertList))
-
-	b.Start(ctx)
-	cancel()
-	<-pollerDone
-	watchJobs.Wait()
+	for _, command := range []struct {
+		text    string
+		handler bot.HandlerFunc
+	}{
+		{"/start", handlerStart},
+		{"/help", handlerStart},
+		{"/cancel", handlerCancel},
+		{"/alert_set", handlerAlertSet},
+		{"/alerts", handlerAlertList},
+		{"/alertSet", handlerAlertSet},
+		{"/alertList", handlerAlertList},
+	} {
+		b.RegisterHandler(bot.HandlerTypeMessageText, command.text, bot.MatchTypeExact, serialized(command.handler))
+	}
+	return b, nil
 }
 
 func checkForNewAlert(ctx context.Context) {
@@ -172,6 +230,11 @@ func runAlertPoller(ctx context.Context) (panicked bool) {
 				continue
 			}
 
+			if messengerFor(alert.Platform) == nil {
+				warnUnservedPlatform(alert.Platform)
+				continue
+			}
+
 			if alert.SearchQuery != "" {
 				launchStructuredPoll(ctx, alert)
 				continue
@@ -204,13 +267,12 @@ func runAlertPoller(ctx context.Context) (panicked bool) {
 						if !exists {
 							var evaluation *ai.EvaluationResult
 							var importantData divar.PostImportantData
-							if alert.AIEnabled {
-								postDetail, err := divar.GetPostContext(ctx, post.Data.Token)
-								if err != nil {
-									sugar.Errorw("Failed to get post details", "error", err, "token", post.Data.Token)
-								} else {
-
-									importantData = divar.ExtractImportantData(postDetail)
+							postDetail, err := divar.GetPostContext(ctx, post.Data.Token)
+							if err != nil {
+								sugar.Errorw("Failed to get post details", "error", err, "token", post.Data.Token)
+							} else {
+								importantData = divar.ExtractImportantData(postDetail)
+								if alert.AIEnabled {
 									postHistory, historyErr := database.LoadHistory(alert.Id)
 									if historyErr != nil {
 										sugar.Errorw("Failed to load post history", "error", historyErr, "alert", alert.Title)
@@ -256,10 +318,15 @@ func runAlertPoller(ctx context.Context) (panicked bool) {
 							text += fmt.Sprintf("https://divar.ir/v/%s", post.Data.Token)
 
 							// Step 6: Send the notification before recording the post as delivered.
-							err = sendPostNotification(ctx, alert.ChatId, post.Data.ImageURL, text)
+							messageID, err := sendPostNotification(ctx, alert.Platform, alert.ChatId, post.Data.ImageURL, text)
 							if err != nil {
 								sugar.Errorw("Failed to notify user", "error", err, "alert", alert.Title)
 								return err
+							}
+							if importantData.Location.HasPoint() {
+								if err := sendListingLocation(ctx, alert.Platform, alert.ChatId, messageID, importantData.Location); err != nil {
+									sugar.Warnw("Unable to send listing location", "error", err, "alert", alert.Title)
+								}
 							}
 
 							// Step 7: Record successful delivery so failed sends can be retried.
@@ -313,23 +380,59 @@ func parsePollInterval(raw string) (time.Duration, error) {
 	return time.Duration(seconds) * time.Second, nil
 }
 
-func sendPostNotification(ctx context.Context, chatID int64, imageURL, text string) error {
-	if imageURL == "" {
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: truncateText(text, 4096)})
-		return err
-	}
+var unservedPlatforms sync.Map
 
-	_, err := b.SendPhoto(ctx, &bot.SendPhotoParams{
-		ChatID:  chatID,
-		Photo:   &models.InputFileString{Data: imageURL},
-		Caption: truncateText(text, 1024),
-	})
-	if err == nil {
-		return nil
+// warnUnservedPlatform logs once per platform whose alerts are paused because
+// its bot token is not configured.
+func warnUnservedPlatform(platform string) {
+	if _, warned := unservedPlatforms.LoadOrStore(platform, true); !warned {
+		sugar.Warnw("Alerts paused: no bot configured for their platform", "platform", platform)
 	}
+}
 
-	_, fallbackErr := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: truncateText(text, 4096)})
-	return fallbackErr
+// sendPostNotification sends a listing and returns the sent message's ID.
+func sendPostNotification(ctx context.Context, platform string, chatID int64, imageURL, text string) (int, error) {
+	m := messengerFor(platform)
+	if m == nil {
+		return 0, fmt.Errorf("no bot configured for platform %q", platform)
+	}
+	b := m.bot
+	if imageURL != "" {
+		message, err := b.SendPhoto(ctx, &bot.SendPhotoParams{
+			ChatID:  chatID,
+			Photo:   &models.InputFileString{Data: imageURL},
+			Caption: truncateText(text, 1024),
+		})
+		if err == nil {
+			return message.ID, nil
+		}
+	}
+	message, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: truncateText(text, 4096)})
+	if err != nil {
+		return 0, err
+	}
+	return message.ID, nil
+}
+
+// sendListingLocation sends a listing's location as a map pin replying to the
+// listing message. Approximate locations carry their radius, which Telegram
+// draws as an accuracy circle (up to 1500 m).
+func sendListingLocation(ctx context.Context, platform string, chatID int64, replyTo int, location divar.LocationInfo) error {
+	m := messengerFor(platform)
+	if m == nil {
+		return fmt.Errorf("no bot configured for platform %q", platform)
+	}
+	params := &bot.SendLocationParams{
+		ChatID:             chatID,
+		Latitude:           location.Latitude,
+		Longitude:          location.Longitude,
+		HorizontalAccuracy: min(location.RadiusMeters, 1500),
+	}
+	if replyTo != 0 {
+		params.ReplyParameters = &models.ReplyParameters{MessageID: replyTo, AllowSendingWithoutReply: true}
+	}
+	_, err := m.bot.SendLocation(ctx, params)
+	return err
 }
 
 func truncateText(text string, limit int) string {

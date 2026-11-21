@@ -120,10 +120,10 @@ def main():
                     assert row and row[1:] == (123, '{"title":"retained"}', None)
                     if cycle == 0:
                         old_id = row[0]
-                        conn.execute("INSERT INTO processes VALUES(999,'SMOKE','{}',123)")
+                        conn.execute("INSERT INTO processes(chat_id,process_key,process_data,last_action_at) VALUES(999,'SMOKE','{}',123)")
                     else:
                         assert row[0] == old_id
-                        assert conn.execute("SELECT process_key FROM processes WHERE chat_id=999").fetchone() == ("SMOKE",)
+                        assert conn.execute("SELECT process_key,platform FROM processes WHERE chat_id=999").fetchone() == ("SMOKE", "telegram")
                     assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
                 docker("stop", "--timeout", "60", name)
                 state = json.loads(docker("inspect", name))[0]["State"]

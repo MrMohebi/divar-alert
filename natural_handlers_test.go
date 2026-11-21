@@ -87,13 +87,13 @@ func TestChatIdleTextConfirmationStaleClickAndCancellation(t *testing.T) {
 	setSimplePlanner()
 	ctx := context.Background()
 	serialized(handlerDefault)(ctx, fake.bot, textUpdate("خودروی مناسب در کرمان می‌خواهم"))
-	draft, _, err := loadDraft(42)
+	draft, _, err := loadDraft(database, 42)
 	if err != nil || draft == nil || draft.State != "confirm" {
 		t.Fatalf("conversation failed: %+v, %v", draft, err)
 	}
 	oldCallback := draftCallback(draft, "confirm")
 	serialized(handlerCallbackDraft)(ctx, fake.bot, callbackUpdate(draftCallback(draft, "edit")))
-	edited, _, _ := loadDraft(42)
+	edited, _, _ := loadDraft(database, 42)
 	if edited.State != "edit" {
 		t.Fatal("edit not applied")
 	}
@@ -103,7 +103,7 @@ func TestChatIdleTextConfirmationStaleClickAndCancellation(t *testing.T) {
 		t.Fatal("stale callback created alert")
 	}
 	serialized(handlerDefault)(ctx, fake.bot, textUpdate("همین شرایط در کرمان باشد"))
-	draft, _, _ = loadDraft(42)
+	draft, _, _ = loadDraft(database, 42)
 	confirm := draftCallback(draft, "confirm")
 	serialized(handlerCallbackDraft)(ctx, fake.bot, callbackUpdate(confirm))
 	serialized(handlerCallbackDraft)(ctx, fake.bot, callbackUpdate(confirm))
@@ -111,13 +111,13 @@ func TestChatIdleTextConfirmationStaleClickAndCancellation(t *testing.T) {
 	if len(alerts) != 1 || alerts[0].Interval != 60 || alerts[0].SearchQuery == "" || !alerts[0].AIEnabled || alerts[0].AnalysisPrompt == "" {
 		t.Fatalf("wrong saved alerts: %+v", alerts)
 	}
-	if draft, _, _ = loadDraft(42); draft != nil {
+	if draft, _, _ = loadDraft(database, 42); draft != nil {
 		t.Fatal("confirmed draft remains")
 	}
 	serialized(handlerAlertSet)(ctx, fake.bot, textUpdate("/alert_set"))
-	draft, _, _ = loadDraft(42)
+	draft, _, _ = loadDraft(database, 42)
 	serialized(handlerCallbackDraft)(ctx, fake.bot, callbackUpdate(draftCallback(draft, "cancel")))
-	if draft, _, _ = loadDraft(42); draft != nil {
+	if draft, _, _ = loadDraft(database, 42); draft != nil {
 		t.Fatal("cancel did not remove draft")
 	}
 	fake.mu.Lock()
@@ -141,7 +141,7 @@ func TestChatErrorRetryAndResume(t *testing.T) {
 		return ai.AlertPlan{}, errors.New("provider unavailable")
 	}
 	serialized(handlerDefault)(ctx, fake.bot, textUpdate("خودرو در کرمان"))
-	draft, _, _ := loadDraft(42)
+	draft, _, _ := loadDraft(database, 42)
 	if draft == nil || draft.State != "error" || len(draft.Messages) != 1 {
 		t.Fatal("failed turn lost input")
 	}
@@ -152,7 +152,7 @@ func TestChatErrorRetryAndResume(t *testing.T) {
 	}
 	setSimplePlanner()
 	serialized(handlerCallbackDraft)(ctx, fake.bot, callbackUpdate(draftCallback(draft, "retry")))
-	draft, _, _ = loadDraft(42)
+	draft, _, _ = loadDraft(database, 42)
 	if draft.State != "confirm" || len(draft.Messages) != 1 {
 		t.Fatal("retry duplicated text or failed")
 	}
@@ -208,5 +208,36 @@ func TestCancelInterruptsInFlightConversation(t *testing.T) {
 	process, err := database.GetProcess(42)
 	if err != nil || process != nil {
 		t.Fatal("canceled interpretation resurrected draft")
+	}
+}
+
+func TestTurningOnAIForConversationalAlertNeedsNoCriteria(t *testing.T) {
+	fake := setupChat(t)
+	conversational := db.Alert{Id: 5, ChatId: 42, Title: "خانه", Interval: 60, SearchQuery: `{"city_ids":["13"]}`, OriginalPrompt: "خانه در کرمان"}
+	linkBased := db.Alert{Id: 6, ChatId: 42, Title: "خودرو", Link: "curl", Interval: 60}
+	for _, alert := range []db.Alert{conversational, linkBased} {
+		if err := database.InsertAlert(alert); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.UpdateAlertAIEnabled(42, alert.Id, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	handlerCallbackToggleAI(context.Background(), fake.bot, callbackUpdate("toggle_ai-5-true"))
+	if process, _ := database.GetProcess(42); process != nil {
+		t.Fatalf("conversational alert asked for criteria: %+v", process)
+	}
+	handlerCallbackToggleAI(context.Background(), fake.bot, callbackUpdate("toggle_ai-6-true"))
+	if process, _ := database.GetProcess(42); process == nil || process.ProcessKey != ProcessKey.SetAIPrompt {
+		t.Fatalf("link-based alert did not ask for criteria: %+v", process)
+	}
+	alerts, _ := database.GetAlertsByChatId(42)
+	enabled := map[int64]bool{}
+	for _, alert := range alerts {
+		enabled[alert.Id] = alert.AIEnabled
+	}
+	if !enabled[5] || enabled[6] {
+		t.Fatalf("AI enabled = %v", enabled)
 	}
 }

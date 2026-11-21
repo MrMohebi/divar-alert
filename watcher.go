@@ -199,38 +199,46 @@ func (w structuredWatcher) Poll(ctx context.Context, alert db.Alert) (pollErr er
 }
 
 // AI is strictly commentary. Errors, low scores, and unmet wishes never change
-// whether this function attempts notification delivery.
+// whether this function attempts notification delivery. The same holds for
+// the listing's location, which follows the notification as a map pin.
 type listingNotifier struct {
 	GetPost       func(context.Context, string) (divar.PostDetailRes, error)
 	Evaluate      func(context.Context, interface{}, []interface{}, string) (*ai.EvaluationResult, error)
 	History       func(int64) ([]interface{}, error)
 	AppendHistory func(int64, interface{}) error
-	Send          func(context.Context, int64, string, string) error
+	Send          func(ctx context.Context, platform string, chatID int64, imageURL, text string) (int, error)
+	SendLocation  func(ctx context.Context, platform string, chatID int64, replyTo int, location divar.LocationInfo) error
 }
 
 func notifyStructuredListing(ctx context.Context, alert db.Alert, post divar.Listing) error {
-	return (listingNotifier{divar.GetPostContext, ai.EvaluatePost, database.LoadHistory, database.AppendHistory, sendPostNotification}).Notify(ctx, alert, post)
+	return (listingNotifier{divar.GetPostContext, ai.EvaluatePost, database.LoadHistory, database.AppendHistory, sendPostNotification, sendListingLocation}).Notify(ctx, alert, post)
 }
 
 func (n listingNotifier) Notify(ctx context.Context, alert db.Alert, post divar.Listing) error {
 	var evaluation *ai.EvaluationResult
 	var details divar.PostImportantData
-	if alert.AIEnabled {
-		raw, err := n.GetPost(ctx, post.Token)
-		if err == nil {
-			details = divar.ExtractImportantData(raw)
+	raw, err := n.GetPost(ctx, post.Token)
+	if err == nil {
+		details = divar.ExtractImportantData(raw)
+		if alert.AIEnabled {
 			history, _ := n.History(alert.Id)
-			evaluation, err = n.Evaluate(ctx, details, history, alert.AnalysisPrompt)
-		}
-		if err != nil {
-			evaluation = nil
-			if sugar != nil {
-				sugar.Warnw("Listing commentary unavailable", "alert_id", alert.Id, "error", err)
-			}
+			evaluation, err = n.Evaluate(ctx, details, history, analysisGoal(alert))
 		}
 	}
-	if err := n.Send(ctx, alert.ChatId, post.ImageURL, listingNotification(alert, post, evaluation)); err != nil {
+	if err != nil {
+		evaluation = nil
+		if sugar != nil {
+			sugar.Warnw("Listing details or commentary unavailable", "alert_id", alert.Id, "error", err)
+		}
+	}
+	messageID, err := n.Send(ctx, alert.Platform, alert.ChatId, post.ImageURL, listingNotification(alert, post, evaluation))
+	if err != nil {
 		return err
+	}
+	if details.Location.HasPoint() && n.SendLocation != nil {
+		if err := n.SendLocation(ctx, alert.Platform, alert.ChatId, messageID, details.Location); err != nil && sugar != nil {
+			sugar.Warnw("Unable to send listing location", "alert_id", alert.Id, "error", err)
+		}
 	}
 	if alert.AIEnabled && details.Token != "" {
 		if err := n.AppendHistory(alert.Id, details); err != nil && sugar != nil {
@@ -238,6 +246,23 @@ func (n listingNotifier) Notify(ctx context.Context, alert db.Alert, post divar.
 		}
 	}
 	return nil
+}
+
+// analysisGoal tells the AI what to judge. Alerts made by conversation are
+// judged against the owner's own request; older link-based alerts keep their
+// saved prompt, or the default rental prompt when it is empty.
+func analysisGoal(alert db.Alert) string {
+	if alert.SearchQuery == "" {
+		return alert.AnalysisPrompt
+	}
+	goal := "Judge how well this listing matches the owner's request and whether its price is good compared with similar earlier listings for this alert. Point out anything the owner should check before contacting the seller. Write the explanation briefly in Persian."
+	if request := strings.TrimSpace(alert.OriginalPrompt); request != "" {
+		goal += "\n\nOwner's request:\n" + request
+	}
+	if preferences := strings.TrimSpace(alert.AnalysisPrompt); preferences != "" {
+		goal += "\n\nOwner's extra preferences:\n" + preferences
+	}
+	return goal
 }
 
 func listingNotification(alert db.Alert, post divar.Listing, evaluation *ai.EvaluationResult) string {

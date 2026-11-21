@@ -21,6 +21,12 @@ var conversationService *conversation.Service
 var chatLocks sync.Map
 var activeTurns sync.Map
 
+// chatKey identifies a chat on one bot; chat IDs are only unique per platform.
+type chatKey struct {
+	bot *bot.Bot
+	id  int64
+}
+
 // All updates that can modify a draft share this lock, including /cancel.
 func serialized(handler bot.HandlerFunc) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -30,12 +36,13 @@ func serialized(handler bot.HandlerFunc) bot.HandlerFunc {
 		} else if id, _, ok := callbackMessage(update); ok {
 			chatID = id
 		}
+		key := chatKey{b, chatID}
 		if update.Message != nil && update.Message.Text == "/cancel" {
-			if cancel, ok := activeTurns.Load(chatID); ok {
+			if cancel, ok := activeTurns.Load(key); ok {
 				cancel.(context.CancelFunc)()
 			}
 		}
-		value, _ := chatLocks.LoadOrStore(chatID, &sync.Mutex{})
+		value, _ := chatLocks.LoadOrStore(key, &sync.Mutex{})
 		lock := value.(*sync.Mutex)
 		lock.Lock()
 		defer lock.Unlock()
@@ -43,16 +50,16 @@ func serialized(handler bot.HandlerFunc) bot.HandlerFunc {
 	}
 }
 
-func saveDraft(chatID int64, draft *conversation.AlertDraft) error {
+func saveDraft(store *db.DB, chatID int64, draft *conversation.AlertDraft) error {
 	data, err := json.Marshal(draft)
 	if err != nil {
 		return err
 	}
-	return database.UpsertProcess(chatID, conversation.ProcessKey, string(data), time.Now().Unix())
+	return store.UpsertProcess(chatID, conversation.ProcessKey, string(data), time.Now().Unix())
 }
 
-func loadDraft(chatID int64) (*conversation.AlertDraft, *db.Process, error) {
-	process, err := database.GetProcess(chatID)
+func loadDraft(store *db.DB, chatID int64) (*conversation.AlertDraft, *db.Process, error) {
+	process, err := store.GetProcess(chatID)
 	if err != nil || process == nil {
 		return nil, process, err
 	}
@@ -72,7 +79,7 @@ func startNaturalAlert(ctx context.Context, b *bot.Bot, chatID int64) {
 		return
 	}
 	// Resume unfinished work instead of silently erasing the user's answers.
-	draft, _, err := loadDraft(chatID)
+	draft, _, err := loadDraft(dbFor(b), chatID)
 	if err == nil && draft != nil {
 		sendDraft(ctx, b, chatID, draft)
 		return
@@ -83,7 +90,7 @@ func startNaturalAlert(ctx context.Context, b *bot.Bot, chatID int64) {
 	}
 	draft, err = conversation.NewDraft()
 	if err == nil {
-		err = saveDraft(chatID, draft)
+		err = saveDraft(dbFor(b), chatID, draft)
 	}
 	if err != nil {
 		sendMessage(ctx, b, chatID, "شروع گفت‌وگو ممکن نشد. دوباره تلاش کن.", nil)
@@ -93,7 +100,7 @@ func startNaturalAlert(ctx context.Context, b *bot.Bot, chatID int64) {
 }
 
 func handleNaturalText(ctx context.Context, b *bot.Bot, chatID int64, text string) {
-	draft, _, err := loadDraft(chatID)
+	draft, _, err := loadDraft(dbFor(b), chatID)
 	if err != nil {
 		sendMessage(ctx, b, chatID, "گفت‌وگو فعلاً در دسترس نیست. کمی بعد دوباره تلاش کن.", nil)
 		return
@@ -133,20 +140,21 @@ func advanceNatural(ctx context.Context, b *bot.Bot, chatID int64, draft *conver
 		backup.Revision++
 		backup.State = "error"
 		backup.Messages = append(append([]ai.Message(nil), draft.Messages...), ai.Message{Role: "user", Content: text})
-		if err := saveDraft(chatID, &backup); err != nil {
+		if err := saveDraft(dbFor(b), chatID, &backup); err != nil {
 			sendMessage(ctx, b, chatID, "ذخیرهٔ پاسخ ممکن نشد؛ لطفاً دوباره بفرست.", nil)
 			return
 		}
 	}
 	turnCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	activeTurns.Store(chatID, context.CancelFunc(cancel))
-	defer func() { activeTurns.Delete(chatID); cancel() }()
+	key := chatKey{b, chatID}
+	activeTurns.Store(key, context.CancelFunc(cancel))
+	defer func() { activeTurns.Delete(key); cancel() }()
 	err := conversationService.Advance(turnCtx, draft, text)
 	if err != nil {
 		sugar.Warnw("Conversation turn failed", "chat_id", chatID, "error", err)
 		draft.State = "error"
 	}
-	if saveErr := saveDraft(chatID, draft); saveErr != nil {
+	if saveErr := saveDraft(dbFor(b), chatID, draft); saveErr != nil {
 		sugar.Errorw("Failed to persist draft", "error", saveErr)
 		sendMessage(ctx, b, chatID, "ذخیرهٔ پاسخ ممکن نشد؛ لطفاً دوباره بفرست.", nil)
 		return
@@ -207,7 +215,7 @@ func handlerCallbackDraft(ctx context.Context, b *bot.Bot, update *models.Update
 	if !ok {
 		return
 	}
-	draft, process, err := loadDraft(chatID)
+	draft, process, err := loadDraft(dbFor(b), chatID)
 	parts := strings.Split(update.CallbackQuery.Data, ":")
 	if err != nil || draft == nil || len(parts) != 4 || parts[1] != draft.ID || parts[2] != strconv.Itoa(draft.Revision) {
 		answerCallback(ctx, b, update, "این گزینه قدیمی شده؛ از آخرین پیام استفاده کن.", true)
@@ -224,8 +232,8 @@ func handlerCallbackDraft(ctx context.Context, b *bot.Bot, update *models.Update
 			return
 		}
 		state, _ := json.Marshal(WatchState{Boundary: time.Now().UTC()})
-		alert := db.Alert{Id: time.Now().UnixNano(), ChatId: chatID, Title: draft.Plan.Title, Interval: draft.Plan.Interval, SearchQuery: string(query), OriginalPrompt: draft.OriginalPrompt, WatchState: string(state), AIEnabled: len(draft.Plan.AdditionalPreferences) > 0, AnalysisPrompt: strings.Join(draft.Plan.AdditionalPreferences, "\n")}
-		if err = database.ConfirmDraft(chatID, conversation.ProcessKey, process.ProcessData, alert); err != nil {
+		alert := db.Alert{Id: time.Now().UnixNano(), ChatId: chatID, Platform: dbFor(b).Platform(), Title: draft.Plan.Title, Interval: draft.Plan.Interval, SearchQuery: string(query), OriginalPrompt: draft.OriginalPrompt, WatchState: string(state), AIEnabled: true, AnalysisPrompt: strings.Join(draft.Plan.AdditionalPreferences, "\n")}
+		if err = dbFor(b).ConfirmDraft(chatID, conversation.ProcessKey, process.ProcessData, alert); err != nil {
 			answerCallback(ctx, b, update, "ثبت اعلان ممکن نشد؛ لطفاً دوباره تلاش کن.", true)
 			return
 		}
@@ -237,7 +245,7 @@ func handlerCallbackDraft(ctx context.Context, b *bot.Bot, update *models.Update
 	answerCallback(ctx, b, update, "", false)
 	switch {
 	case action == "cancel":
-		if err = database.DeleteProcess(chatID); err != nil {
+		if err = dbFor(b).DeleteProcess(chatID); err != nil {
 			sendMessage(ctx, b, chatID, "لغو درخواست ممکن نشد. دوباره تلاش کن.", nil)
 			return
 		}
@@ -246,7 +254,7 @@ func handlerCallbackDraft(ctx context.Context, b *bot.Bot, update *models.Update
 	case action == "edit" && draft.State == "confirm":
 		draft.Revision++
 		draft.State = "edit"
-		if err = saveDraft(chatID, draft); err != nil {
+		if err = saveDraft(dbFor(b), chatID, draft); err != nil {
 			return
 		}
 		clearCallbackKeyboard(ctx, b, update)

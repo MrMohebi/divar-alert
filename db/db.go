@@ -13,11 +13,23 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// DB wraps the SQLite connection.
+// DB wraps the SQLite connection. A DB returned by ForPlatform scopes every
+// chat-based query to one messaging platform, because Telegram and Bale chat
+// IDs come from separate namespaces and may collide.
 type DB struct {
 	conn      *sql.DB
-	lifecycle sync.Map
+	lifecycle *sync.Map
+	platform  string
 }
+
+// ForPlatform returns a handle sharing this connection whose chat-based reads
+// and writes only see chats of the given platform.
+func (db *DB) ForPlatform(platform string) *DB {
+	return &DB{conn: db.conn, lifecycle: db.lifecycle, platform: platform}
+}
+
+// Platform reports the platform this handle is scoped to.
+func (db *DB) Platform() string { return db.platform }
 
 const maxSavedHistoryPosts = 50
 
@@ -50,7 +62,7 @@ func Open(path string) (*DB, error) {
 		}
 	}
 
-	database := &DB{conn: conn}
+	database := &DB{conn: conn, lifecycle: &sync.Map{}}
 	if err := database.createTables(); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("create sqlite schema (use a new DB_PATH, not the old DuckDB file): %w", err)
@@ -106,16 +118,24 @@ func (db *DB) createTables() error {
 		CREATE INDEX IF NOT EXISTS idx_alert_history_alert_id ON alert_history(alert_id, id);
 
 		CREATE TABLE IF NOT EXISTS processes (
-			chat_id INTEGER PRIMARY KEY,
+			platform TEXT NOT NULL DEFAULT '',
+			chat_id INTEGER NOT NULL,
 			process_key TEXT NOT NULL,
 			process_data TEXT NOT NULL CHECK(json_valid(process_data)),
-			last_action_at INTEGER NOT NULL
+			last_action_at INTEGER NOT NULL,
+			PRIMARY KEY (platform, chat_id)
 		);
 	`)
 	if err != nil {
 		return err
 	}
 	if err := db.migrateAlerts(); err != nil {
+		return err
+	}
+	if err := db.migrateProcesses(); err != nil {
+		return err
+	}
+	if _, err := db.conn.Exec(`CREATE INDEX IF NOT EXISTS idx_alerts_platform_chat ON alerts(platform, chat_id)`); err != nil {
 		return err
 	}
 	return db.migrateDeliveries()
@@ -130,6 +150,7 @@ type Alert struct {
 	AnalysisPrompt  string `json:"analysisPrompt"`
 	Interval        int    `json:"interval"`
 	ChatId          int64  `json:"chatId"`
+	Platform        string `json:"platform"`
 	LastTimeChecked int64  `json:"lastTimeChecked"`
 	SearchQuery     string `json:"searchQuery,omitempty"`
 	OriginalPrompt  string `json:"originalPrompt,omitempty"`
@@ -139,14 +160,14 @@ type Alert struct {
 }
 
 const selectAlerts = `
-	SELECT id, chat_id, title, link, ai_enabled, analysis_prompt, interval_seconds, last_time_checked, search_query, original_prompt, watch_state, deleted_at, generation
+	SELECT id, chat_id, platform, title, link, ai_enabled, analysis_prompt, interval_seconds, last_time_checked, search_query, original_prompt, watch_state, deleted_at, generation
 	FROM alerts`
 
 func scanAlerts(rows *sql.Rows) ([]Alert, error) {
 	var alerts []Alert
 	for rows.Next() {
 		var alert Alert
-		if err := rows.Scan(&alert.Id, &alert.ChatId, &alert.Title, &alert.Link, &alert.AIEnabled, &alert.AnalysisPrompt, &alert.Interval, &alert.LastTimeChecked, &alert.SearchQuery, &alert.OriginalPrompt, &alert.WatchState, &alert.DeletedAt, &alert.Generation); err != nil {
+		if err := rows.Scan(&alert.Id, &alert.ChatId, &alert.Platform, &alert.Title, &alert.Link, &alert.AIEnabled, &alert.AnalysisPrompt, &alert.Interval, &alert.LastTimeChecked, &alert.SearchQuery, &alert.OriginalPrompt, &alert.WatchState, &alert.DeletedAt, &alert.Generation); err != nil {
 			return nil, err
 		}
 		alerts = append(alerts, alert)
@@ -164,7 +185,7 @@ func (db *DB) GetAllAlerts() ([]Alert, error) {
 }
 
 func (db *DB) GetAlertsByChatId(chatId int64) ([]Alert, error) {
-	rows, err := db.conn.Query(selectAlerts+` WHERE chat_id = ? AND deleted_at IS NULL`, chatId)
+	rows, err := db.conn.Query(selectAlerts+` WHERE platform = ? AND chat_id = ? AND deleted_at IS NULL`, db.platform, chatId)
 	if err != nil {
 		return nil, err
 	}
@@ -176,23 +197,26 @@ func (db *DB) InsertAlert(alert Alert) error {
 	if alert.WatchState == "" {
 		alert.WatchState = "{}"
 	}
-	_, err := db.conn.Exec(insertAlertSQL, alert.Id, alert.ChatId, alert.Title, alert.Link, alert.AIEnabled, alert.AnalysisPrompt, alert.Interval, alert.LastTimeChecked, alert.SearchQuery, alert.OriginalPrompt, alert.WatchState)
+	if alert.Platform == "" {
+		alert.Platform = db.platform
+	}
+	_, err := db.conn.Exec(insertAlertSQL, alert.Id, alert.ChatId, alert.Platform, alert.Title, alert.Link, alert.AIEnabled, alert.AnalysisPrompt, alert.Interval, alert.LastTimeChecked, alert.SearchQuery, alert.OriginalPrompt, alert.WatchState)
 	return err
 }
 
 func (db *DB) UpdateAlertAIEnabled(chatId, alertId int64, enabled bool) error {
-	return requireAffected(db.conn.Exec(`UPDATE alerts SET ai_enabled = ? WHERE chat_id = ? AND id = ? AND deleted_at IS NULL`, enabled, chatId, alertId))
+	return requireAffected(db.conn.Exec(`UPDATE alerts SET ai_enabled = ? WHERE platform = ? AND chat_id = ? AND id = ? AND deleted_at IS NULL`, enabled, db.platform, chatId, alertId))
 }
 
 func (db *DB) UpdateAlertAnalysis(chatId, alertId int64, prompt string) error {
-	return requireAffected(db.conn.Exec(`UPDATE alerts SET ai_enabled = true, analysis_prompt = ? WHERE chat_id = ? AND id = ? AND deleted_at IS NULL`, prompt, chatId, alertId))
+	return requireAffected(db.conn.Exec(`UPDATE alerts SET ai_enabled = true, analysis_prompt = ? WHERE platform = ? AND chat_id = ? AND id = ? AND deleted_at IS NULL`, prompt, db.platform, chatId, alertId))
 }
 
 func (db *DB) DeleteAlert(chatId, alertId int64) error {
 	lock := db.alertLock(alertId)
 	lock.Lock()
 	defer lock.Unlock()
-	return requireAffected(db.conn.Exec(`UPDATE alerts SET deleted_at = ? WHERE chat_id = ? AND id = ? AND deleted_at IS NULL`, time.Now().Unix(), chatId, alertId))
+	return requireAffected(db.conn.Exec(`UPDATE alerts SET deleted_at = ? WHERE platform = ? AND chat_id = ? AND id = ? AND deleted_at IS NULL`, time.Now().Unix(), db.platform, chatId, alertId))
 }
 
 func requireAffected(result sql.Result, err error) error {
@@ -289,7 +313,7 @@ func (db *DB) ResetAlert(chatId, alertId int64) error {
 	}
 	defer tx.Rollback()
 
-	if err := requireAffected(tx.Exec(`UPDATE alerts SET last_time_checked = 0, watch_state = '{}', generation = generation + 1 WHERE chat_id = ? AND id = ? AND deleted_at IS NULL`, chatId, alertId)); err != nil {
+	if err := requireAffected(tx.Exec(`UPDATE alerts SET last_time_checked = 0, watch_state = '{}', generation = generation + 1 WHERE platform = ? AND chat_id = ? AND id = ? AND deleted_at IS NULL`, db.platform, chatId, alertId)); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE seen_posts SET deleted_at = ? WHERE alert_id = ? AND deleted_at IS NULL`, time.Now().Unix(), alertId); err != nil {
@@ -303,6 +327,7 @@ func (db *DB) ResetAlert(chatId, alertId int64) error {
 
 // Process represents a multi-step wizard state.
 type Process struct {
+	Platform     string `json:"platform"`
 	ChatId       int64  `json:"chatId"`
 	ProcessKey   string `json:"processKey"`
 	ProcessData  string `json:"processData"`
@@ -312,10 +337,10 @@ type Process struct {
 func (db *DB) GetProcess(chatId int64) (*Process, error) {
 	var process Process
 	err := db.conn.QueryRow(`
-		SELECT chat_id, process_key, process_data, last_action_at
+		SELECT platform, chat_id, process_key, process_data, last_action_at
 		FROM processes
-		WHERE chat_id = ?
-	`, chatId).Scan(&process.ChatId, &process.ProcessKey, &process.ProcessData, &process.LastActionAt)
+		WHERE platform = ? AND chat_id = ?
+	`, db.platform, chatId).Scan(&process.Platform, &process.ChatId, &process.ProcessKey, &process.ProcessData, &process.LastActionAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -327,23 +352,23 @@ func (db *DB) GetProcess(chatId int64) (*Process, error) {
 
 func (db *DB) UpsertProcess(chatId int64, processKey string, processData string, lastActionAt int64) error {
 	_, err := db.conn.Exec(`
-		INSERT INTO processes (chat_id, process_key, process_data, last_action_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET
+		INSERT INTO processes (platform, chat_id, process_key, process_data, last_action_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(platform, chat_id) DO UPDATE SET
 			process_key = excluded.process_key,
 			process_data = excluded.process_data,
 			last_action_at = excluded.last_action_at
-	`, chatId, processKey, processData, lastActionAt)
+	`, db.platform, chatId, processKey, processData, lastActionAt)
 	return err
 }
 
 func (db *DB) DeleteProcess(chatId int64) error {
-	_, err := db.conn.Exec(`DELETE FROM processes WHERE chat_id = ?`, chatId)
+	_, err := db.conn.Exec(`DELETE FROM processes WHERE platform = ? AND chat_id = ?`, db.platform, chatId)
 	return err
 }
 
 func (db *DB) GetAllProcesses() ([]Process, error) {
-	rows, err := db.conn.Query(`SELECT chat_id, process_key, process_data, last_action_at FROM processes`)
+	rows, err := db.conn.Query(`SELECT platform, chat_id, process_key, process_data, last_action_at FROM processes`)
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +377,7 @@ func (db *DB) GetAllProcesses() ([]Process, error) {
 	var processes []Process
 	for rows.Next() {
 		var process Process
-		if err := rows.Scan(&process.ChatId, &process.ProcessKey, &process.ProcessData, &process.LastActionAt); err != nil {
+		if err := rows.Scan(&process.Platform, &process.ChatId, &process.ProcessKey, &process.ProcessData, &process.LastActionAt); err != nil {
 			return nil, err
 		}
 		processes = append(processes, process)

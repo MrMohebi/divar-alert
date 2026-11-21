@@ -36,7 +36,7 @@ func handlerStart(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
-	if draft, _, err := loadDraft(update.Message.Chat.ID); err == nil && draft != nil {
+	if draft, _, err := loadDraft(dbFor(b), update.Message.Chat.ID); err == nil && draft != nil {
 		sendDraft(ctx, b, update.Message.Chat.ID, draft)
 		return
 	}
@@ -47,7 +47,7 @@ func handlerCancel(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
-	if err := database.DeleteProcess(update.Message.Chat.ID); err != nil {
+	if err := dbFor(b).DeleteProcess(update.Message.Chat.ID); err != nil {
 		sugar.Errorw("Failed to cancel process", "error", err)
 		sendMessage(ctx, b, update.Message.Chat.ID, "لغو عملیات انجام نشد. دوباره تلاش کنید.", nil)
 		return
@@ -81,7 +81,7 @@ func handlerDefault(ctx context.Context, b *bot.Bot, update *models.Update) {
 		sendMessage(ctx, b, update.Message.Chat.ID, "برای ساخت اعلان، در گفت‌وگوی خصوصی پیام بده.", nil)
 		return
 	}
-	stored, loadErr := database.GetProcess(update.Message.Chat.ID)
+	stored, loadErr := dbFor(b).GetProcess(update.Message.Chat.ID)
 	if loadErr != nil {
 		sendMessage(ctx, b, update.Message.Chat.ID, "خواندن گفت‌وگو ممکن نشد؛ کمی بعد دوباره تلاش کن.", nil)
 		return
@@ -94,7 +94,7 @@ func handlerDefault(ctx context.Context, b *bot.Bot, update *models.Update) {
 		handleNaturalText(ctx, b, update.Message.Chat.ID, update.Message.Text)
 		return
 	}
-	_, process, err := CurrentProcess(update.Message.Chat.ID, database)
+	_, process, err := CurrentProcess(update.Message.Chat.ID, dbFor(b))
 	if err != nil {
 		sendMessage(ctx, b, update.Message.Chat.ID, "یک گزینه از منو انتخاب کنید.", mainMenuKeyboard())
 		return
@@ -104,7 +104,7 @@ func handlerDefault(ctx context.Context, b *bot.Bot, update *models.Update) {
 		sendProcessStep(ctx, b, process)
 		return
 	}
-	nextProcess, err := ProcessGoNextStep(process, update.Message.Text, database)
+	nextProcess, err := ProcessGoNextStep(process, update.Message.Text, dbFor(b))
 	if err != nil {
 		sugar.Infow("Invalid process input", "error", err, "chat_id", update.Message.Chat.ID)
 		sendMessage(ctx, b, update.Message.Chat.ID, "ورودی معتبر نیست. لطفا دوباره تلاش کنید.\n\n"+currentStep(process).Message, forceReply(currentStep(process)))
@@ -139,12 +139,12 @@ func handlerCallbackSetAI(ctx context.Context, b *bot.Bot, update *models.Update
 		answerCallback(ctx, b, update, "انتخاب نامعتبر است.", true)
 		return
 	}
-	_, process, err := CurrentProcess(chatID, database)
+	_, process, err := CurrentProcess(chatID, dbFor(b))
 	if err != nil || currentStep(process).Name != "ai_enabled" {
 		answerCallback(ctx, b, update, "این مرحله قبلا تمام شده است.", true)
 		return
 	}
-	nextProcess, err := ProcessGoNextStep(process, enabled, database)
+	nextProcess, err := ProcessGoNextStep(process, enabled, dbFor(b))
 	if err != nil {
 		sugar.Errorw("Failed to set process AI state", "error", err)
 		answerCallback(ctx, b, update, "ثبت انتخاب ممکن نشد.", true)
@@ -162,12 +162,12 @@ func handlerCallbackSetInterval(ctx context.Context, b *bot.Bot, update *models.
 		return
 	}
 	interval := strings.TrimPrefix(update.CallbackQuery.Data, "set_interval-")
-	_, process, err := CurrentProcess(chatID, database)
+	_, process, err := CurrentProcess(chatID, dbFor(b))
 	if err != nil || currentStep(process).Name != "interval" {
 		answerCallback(ctx, b, update, "این مرحله قبلا تمام شده است.", true)
 		return
 	}
-	nextProcess, err := ProcessGoNextStep(process, interval, database)
+	nextProcess, err := ProcessGoNextStep(process, interval, dbFor(b))
 	if err != nil {
 		sugar.Errorw("Failed to set process interval", "error", err)
 		answerCallback(ctx, b, update, "ثبت فاصله ممکن نشد.", true)
@@ -190,14 +190,16 @@ func handlerCallbackToggleAI(ctx context.Context, b *bot.Bot, update *models.Upd
 		return
 	}
 	if enabled {
-		alerts, listErr := database.GetAlertsByChatId(chatID)
+		alerts, listErr := dbFor(b).GetAlertsByChatId(chatID)
 		if listErr != nil {
 			answerCallback(ctx, b, update, "دریافت اعلان ممکن نشد.", true)
 			return
 		}
 		for _, alert := range alerts {
-			if alert.Id == alertID && strings.TrimSpace(alert.AnalysisPrompt) == "" {
-				process, processErr := ProcessStartAIPrompt(chatID, alertID, database)
+			// Conversational alerts are judged against the owner's request, so
+			// only older link-based alerts need criteria before AI can run.
+			if alert.Id == alertID && alert.SearchQuery == "" && strings.TrimSpace(alert.AnalysisPrompt) == "" {
+				process, processErr := ProcessStartAIPrompt(chatID, alertID, dbFor(b))
 				if processErr != nil {
 					sugar.Errorw("Failed to start AI prompt process", "error", processErr)
 					answerCallback(ctx, b, update, "شروع تنظیم تحلیل ممکن نشد.", true)
@@ -209,7 +211,7 @@ func handlerCallbackToggleAI(ctx context.Context, b *bot.Bot, update *models.Upd
 			}
 		}
 	}
-	if err := database.UpdateAlertAIEnabled(chatID, alertID, enabled); err != nil {
+	if err := dbFor(b).UpdateAlertAIEnabled(chatID, alertID, enabled); err != nil {
 		sugar.Errorw("Failed to toggle alert AI", "error", err)
 		answerCallback(ctx, b, update, "تغییر وضعیت ممکن نشد.", true)
 		return
@@ -233,7 +235,7 @@ func handlerCallbackDeleteAlert(ctx context.Context, b *bot.Bot, update *models.
 		answerCallback(ctx, b, update, "اعلان نامعتبر است.", true)
 		return
 	}
-	alerts, err := database.GetAlertsByChatId(chatID)
+	alerts, err := dbFor(b).GetAlertsByChatId(chatID)
 	if err != nil {
 		answerCallback(ctx, b, update, "دریافت اعلان ممکن نشد.", true)
 		return
@@ -262,7 +264,7 @@ func handlerCallbackConfirmDelete(ctx context.Context, b *bot.Bot, update *model
 		answerCallback(ctx, b, update, "اعلان نامعتبر است.", true)
 		return
 	}
-	if err := database.DeleteAlert(chatID, alertID); err != nil {
+	if err := dbFor(b).DeleteAlert(chatID, alertID); err != nil {
 		sugar.Errorw("Failed to delete alert", "error", err)
 		answerCallback(ctx, b, update, "حذف اعلان ممکن نشد.", true)
 		return
@@ -294,7 +296,7 @@ func handlerCallbackResetAlert(ctx context.Context, b *bot.Bot, update *models.U
 		answerCallback(ctx, b, update, "اعلان نامعتبر است.", true)
 		return
 	}
-	alerts, err := database.GetAlertsByChatId(chatID)
+	alerts, err := dbFor(b).GetAlertsByChatId(chatID)
 	if err != nil {
 		answerCallback(ctx, b, update, "دریافت اعلان ممکن نشد.", true)
 		return
@@ -324,7 +326,7 @@ func handlerCallbackConfirmReset(ctx context.Context, b *bot.Bot, update *models
 		answerCallback(ctx, b, update, "اعلان نامعتبر است.", true)
 		return
 	}
-	if err := database.ResetAlert(chatID, alertID); err != nil {
+	if err := dbFor(b).ResetAlert(chatID, alertID); err != nil {
 		sugar.Errorw("Failed to reset alert", "error", err)
 		answerCallback(ctx, b, update, "تازه‌سازی اعلان ممکن نشد.", true)
 		return
@@ -394,7 +396,7 @@ func currentStep(process Process) Step {
 }
 
 func sendAlertList(ctx context.Context, b *bot.Bot, chatID int64) {
-	alerts, err := database.GetAlertsByChatId(chatID)
+	alerts, err := dbFor(b).GetAlertsByChatId(chatID)
 	if err != nil {
 		sugar.Errorw("Failed to list alerts", "error", err)
 		sendMessage(ctx, b, chatID, "دریافت اعلان‌ها ممکن نشد.", nil)
@@ -405,7 +407,7 @@ func sendAlertList(ctx context.Context, b *bot.Bot, chatID int64) {
 }
 
 func refreshAlertList(ctx context.Context, b *bot.Bot, chatID int64, messageID int) {
-	alerts, err := database.GetAlertsByChatId(chatID)
+	alerts, err := dbFor(b).GetAlertsByChatId(chatID)
 	if err != nil {
 		sugar.Errorw("Failed to refresh alerts", "error", err)
 		return

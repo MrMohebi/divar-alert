@@ -7,7 +7,7 @@ import (
 
 var ErrStaleDraft = errors.New("draft has already changed or been confirmed")
 
-const insertAlertSQL = `INSERT INTO alerts (id,chat_id,title,link,ai_enabled,analysis_prompt,interval_seconds,last_time_checked,search_query,original_prompt,watch_state) VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+const insertAlertSQL = `INSERT INTO alerts (id,chat_id,platform,title,link,ai_enabled,analysis_prompt,interval_seconds,last_time_checked,search_query,original_prompt,watch_state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
 
 // Additive migration preserves existing SQLite alerts and supports reopening.
 func (db *DB) migrateAlerts() error {
@@ -37,6 +37,7 @@ func (db *DB) migrateAlerts() error {
 		{"deleted_at", `INTEGER`},
 		{"generation", `INTEGER NOT NULL DEFAULT 0`},
 		{"watch_state", `TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(watch_state))`},
+		{"platform", `TEXT NOT NULL DEFAULT ''`},
 	} {
 		if !names[column.name] {
 			if _, err = db.conn.Exec("ALTER TABLE alerts ADD COLUMN " + column.name + " " + column.definition); err != nil {
@@ -50,7 +51,10 @@ func (db *DB) migrateAlerts() error {
 // ConfirmDraft atomically consumes the exact saved draft and creates one alert.
 // A second callback cannot create a second alert, including after a restart.
 func (db *DB) ConfirmDraft(chatID int64, key, expected string, alert Alert) error {
-	if alert.ChatId != chatID {
+	if alert.Platform == "" {
+		alert.Platform = db.platform
+	}
+	if alert.ChatId != chatID || alert.Platform != db.platform {
 		return fmt.Errorf("alert does not belong to draft owner")
 	}
 	tx, err := db.conn.Begin()
@@ -58,7 +62,7 @@ func (db *DB) ConfirmDraft(chatID int64, key, expected string, alert Alert) erro
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`DELETE FROM processes WHERE chat_id=? AND process_key=? AND process_data=?`, chatID, key, expected)
+	result, err := tx.Exec(`DELETE FROM processes WHERE platform=? AND chat_id=? AND process_key=? AND process_data=?`, db.platform, chatID, key, expected)
 	if err != nil {
 		return err
 	}
@@ -72,7 +76,7 @@ func (db *DB) ConfirmDraft(chatID int64, key, expected string, alert Alert) erro
 	if alert.WatchState == "" {
 		alert.WatchState = "{}"
 	}
-	_, err = tx.Exec(insertAlertSQL, alert.Id, alert.ChatId, alert.Title, alert.Link, alert.AIEnabled, alert.AnalysisPrompt, alert.Interval, alert.LastTimeChecked, alert.SearchQuery, alert.OriginalPrompt, alert.WatchState)
+	_, err = tx.Exec(insertAlertSQL, alert.Id, alert.ChatId, alert.Platform, alert.Title, alert.Link, alert.AIEnabled, alert.AnalysisPrompt, alert.Interval, alert.LastTimeChecked, alert.SearchQuery, alert.OriginalPrompt, alert.WatchState)
 	if err != nil {
 		return err
 	}

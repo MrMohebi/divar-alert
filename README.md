@@ -3,14 +3,14 @@
 
 ## What is this project?
 
-This project is a bot designed to monitor your filters on [Divar](https://divar.ir) and send alerts when new posts matching your filters are published. The bot integrates with both [Telegram](https://telegram.org) and [Bale](https://bale.ai) messaging platforms. You can configure the bot to work with either platform by setting the appropriate API URL and token in the `.env` file.
+This project is a bot designed to monitor your filters on [Divar](https://divar.ir) and send alerts when new posts matching your filters are published. The bot runs on [Telegram](https://telegram.org) and [Bale](https://bale.ai) at the same time: set a token for each platform you want in the `.env` file. Each alert is delivered on the platform where it was created.
 
 ### Key Features:
 - Describe an alert in Persian; the bot resolves cities, categories, and live Divar filters.
 - Answer up to five dynamic clarification questions, review the summary, and confirm.
 - Monitor every 60 seconds by default, with up to three current listings sent initially.
 - **Prompt-based AI analysis** for any Divar category using OpenAI.
-- Supports both Telegram and Bale bots.
+- Serves Telegram and Bale bots together from one process and one database.
 - Persistent storage using SQLite, including alerts, bot state, delivered posts, and AI history.
 - Easy-to-use commands for managing alerts.
 - Historical post tracking for better AI comparisons.
@@ -25,8 +25,8 @@ This project is a bot designed to monitor your filters on [Divar](https://divar.
 - [Air](https://github.com/air-verse/air) (optional, for live reload during development)
 - A `.env` file with the following variables:
   ```env
-  TELEGRAM_BOT_TOKEN=<Your Telegram or Bale Bot Token>
-  TELEGRAM_API_URL=<Telegram or Bale API URL>
+  TELEGRAM_BOT_TOKEN=<Your Telegram bot token; optional>
+  BALE_BOT_TOKEN=<Your Bale bot token; optional>
   DB_PATH=<Path to the SQLite database file>
   POLL_INTERVAL_SECONDS=<Seconds between scheduler scans; default 1>
   ```
@@ -50,21 +50,24 @@ This project is a bot designed to monitor your filters on [Divar](https://divar.
    `.env.example` and configure:
    ```env
    DIVAR_IMAGE_TAG=sha-<full-commit-from-the-successful-workflow>
-   TELEGRAM_BOT_TOKEN=<your-token>
-   TELEGRAM_API_URL=https://tapi.bale.ai
+   TELEGRAM_BOT_TOKEN=<your-telegram-token>
+   BALE_BOT_TOKEN=<your-bale-token>
    POLL_INTERVAL_SECONDS=1
    OPENAI_API_KEY=<your-key>
    OPENAI_BASE_URL=https://api.openai.com/v1
    OPENAI_MODEL=gpt-4o-mini
    ```
-   Use `https://api.telegram.org` for Telegram. Keep a custom AI base URL/model if
+   Set one or both bot tokens. If the database already has alerts from an
+   earlier single-bot version and both tokens are set, also set
+   `EXISTING_ALERTS_PLATFORM` to the platform that created them (`bale` or
+   `telegram`); the bot refuses to start until it knows. Keep a custom AI base URL/model if
    your provider requires it. Conversational alert setup needs the AI key.
    Compose loads `.env` into the container and sets
    `DB_PATH=/root/app/data/divar-alert.db`, overriding any native path in `.env`.
    Do not paste resolved `docker compose config` output into logs or tickets;
    it includes credentials. No inbound ports are needed.
 
-3. Stop any other instance using the same bot token before starting this one.
+3. Stop any other instance using the same bot tokens before starting this one.
    Create `data/` and preserve any existing SQLite database there. Before the
    first migration or an upgrade, stop the bot and back up the whole directory,
    including any SQLite WAL files:
@@ -378,8 +381,11 @@ You can customize the AI behavior by:
 
 | Variable            | Description                                      |
 |---------------------|--------------------------------------------------|
-| `TELEGRAM_BOT_TOKEN`| The token for your Telegram or Bale bot.         |
-| `TELEGRAM_API_URL`  | The API URL for Telegram or Bale.                |
+| `TELEGRAM_BOT_TOKEN`| Token of your Telegram bot. Set this, `BALE_BOT_TOKEN`, or both. |
+| `TELEGRAM_API_URL`  | (Optional) Telegram Bot API URL. Default: `https://api.telegram.org` |
+| `BALE_BOT_TOKEN`    | Token of your Bale bot. |
+| `BALE_API_URL`      | (Optional) Bale Bot API URL. Default: `https://tapi.bale.ai` |
+| `EXISTING_ALERTS_PLATFORM` | `bale` or `telegram`: the platform that created alerts saved by an earlier single-bot version. Needed only when both tokens are set and such alerts exist. |
 | `DIVAR_IMAGE_TAG`  | Required by Docker Compose: a published release tag or `sha-<full-commit>`. |
 | `DB_PATH`           | The path to the SQLite database file.            |
 | `POLL_INTERVAL_SECONDS` | Scheduler scan interval from 1 to 3600 seconds. Default: `1` |
@@ -392,7 +398,8 @@ You can customize the AI behavior by:
 ## Example `.env` File
 ```env
 TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-TELEGRAM_API_URL=https://api.telegram.org
+BALE_BOT_TOKEN=654321:XYZ-abcdef1234567890
+EXISTING_ALERTS_PLATFORM=bale
 DB_PATH=./data/divar-alert.db
 POLL_INTERVAL_SECONDS=1
 

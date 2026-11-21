@@ -556,6 +556,8 @@ func (s *Service) Summary(d *AlertDraft) string {
 	}
 	if len(p.AdditionalPreferences) > 0 {
 		out.WriteString("\nبرای امتیاز و توضیح آگهی‌ها:\n• " + strings.Join(p.AdditionalPreferences, "\n• ") + "\nهمهٔ نتیجه‌های جستجو ارسال می‌شوند؛ امتیاز باعث حذف آگهی نمی‌شود.\n")
+	} else {
+		out.WriteString("\nهر آگهی بر اساس خواسته‌ات با هوش مصنوعی امتیاز و توضیح می‌گیرد؛ همهٔ نتیجه‌های جستجو ارسال می‌شوند.\n")
 	}
 	if len(p.Gaps) > 0 {
 		out.WriteString("\nمواردی که باید بدانی:\n• " + strings.Join(p.Gaps, "\n• ") + "\n")
