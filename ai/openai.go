@@ -45,19 +45,14 @@ type OpenAIRequest struct {
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
 	Model          string          `json:"model"`
 	Messages       []Message       `json:"messages"`
+	// Stream is always sent as false: some compatible providers stream by
+	// default when it is omitted.
+	Stream bool `json:"stream"`
 }
 
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
-}
-
-type OpenAIResponse struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
 }
 
 // EvaluatePost evaluates any Divar listing using the alert owner's analysis goal.
@@ -134,19 +129,10 @@ func evaluatePost(ctx context.Context, client httpDoer, newPost interface{}, his
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	var openAIResp OpenAIResponse
-	if err := json.Unmarshal(body, &openAIResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal OpenAI response: %w", err)
+	content, err := completionContent(body)
+	if err != nil {
+		return nil, err
 	}
-	if len(openAIResp.Choices) == 0 {
-		return nil, errors.New("no choices in OpenAI response")
-	}
-
-	content := strings.TrimSpace(openAIResp.Choices[0].Message.Content)
-	content = strings.TrimPrefix(content, "```json")
-	content = strings.TrimPrefix(content, "```")
-	content = strings.TrimSuffix(content, "```")
-	content = strings.TrimSpace(content)
 
 	var result EvaluationResult
 	if err := json.Unmarshal([]byte(content), &result); err != nil {

@@ -181,18 +181,7 @@ func completeConversation(ctx context.Context, client httpDoer, messages []Messa
 		break
 	}
 
-	var result OpenAIResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", err
-	}
-	if len(result.Choices) == 0 {
-		return "", fmt.Errorf("conversation response has no choices")
-	}
-	text := strings.TrimSpace(result.Choices[0].Message.Content)
-	text = strings.TrimPrefix(text, "```json")
-	text = strings.TrimPrefix(text, "```")
-	text = strings.TrimSuffix(text, "```")
-	return strings.TrimSpace(text), nil
+	return completionContent(body)
 }
 
 func unsupportedJSONMode(body []byte) bool {
