@@ -225,3 +225,11 @@ func TestParseAIToggle(t *testing.T) {
 		t.Fatal("parseAIToggle() accepted invalid data")
 	}
 }
+
+func TestEmptyAlertListSendsWithoutKeyboard(t *testing.T) {
+	ta := newTestApp(t)
+	ta.dispatch(ta.telegram, ta.handleMenu, callbackUpdate("menu_list"))
+	if texts := ta.telegram.texts("sendMessage"); len(texts) != 1 || !strings.Contains(texts[0], "/alert_set") {
+		t.Fatalf("sendMessage texts = %q", texts)
+	}
+}
