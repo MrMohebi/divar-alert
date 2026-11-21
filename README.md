@@ -9,8 +9,9 @@ This project is a bot designed to monitor your filters on [Divar](https://divar.
 - Describe an alert in Persian; the bot resolves cities, categories, and live Divar filters.
 - Answer up to five dynamic clarification questions, review the summary, and confirm.
 - Monitor every 60 seconds by default, with up to three current listings sent initially.
-- **Prompt-based AI analysis** for any Divar category using OpenAI.
-- Serves Telegram and Bale bots together from one process and one database.
+- **AI analysis** of every listing against your own request, for any Divar category, through any OpenAI-compatible API.
+- **Location pins**: listings with a location on Divar are followed by a map pin; approximate locations show their radius.
+- Serves Telegram and Bale bots together from one process and one database; each chat belongs to its platform.
 - Persistent storage using SQLite, including alerts, bot state, delivered posts, and AI history.
 - Easy-to-use commands for managing alerts.
 - Historical post tracking for better AI comparisons.
@@ -57,20 +58,16 @@ This project is a bot designed to monitor your filters on [Divar](https://divar.
    OPENAI_BASE_URL=https://api.openai.com/v1
    OPENAI_MODEL=gpt-4o-mini
    ```
-   Set one or both bot tokens. If the database already has alerts from an
-   earlier single-bot version and both tokens are set, also set
-   `EXISTING_ALERTS_PLATFORM` to the platform that created them (`bale` or
-   `telegram`); the bot refuses to start until it knows. Keep a custom AI base URL/model if
-   your provider requires it. Conversational alert setup needs the AI key.
+   Set one or both bot tokens; each token starts that platform's bot. Keep a
+   custom AI base URL/model if your provider requires it. Conversational alert setup needs the AI key.
    Compose loads `.env` into the container and sets
    `DB_PATH=/root/app/data/divar-alert.db`, overriding any native path in `.env`.
    Do not paste resolved `docker compose config` output into logs or tickets;
    it includes credentials. No inbound ports are needed.
 
 3. Stop any other instance using the same bot tokens before starting this one.
-   Create `data/` and preserve any existing SQLite database there. Before the
-   first migration or an upgrade, stop the bot and back up the whole directory,
-   including any SQLite WAL files:
+   Create `data/` for the SQLite database. Before an upgrade, stop the bot and
+   back up the whole directory, including any SQLite WAL files:
    ```bash
    mkdir -p data
    docker compose stop
@@ -94,9 +91,12 @@ This project is a bot designed to monitor your filters on [Divar](https://divar.
 
 For upgrades, stop and back up first, change `DIVAR_IMAGE_TAG` to the tested
 version, then pull and recreate with the same commands. Keep one running bot
-instance and one writable database. Existing SQLite alerts migrate automatically;
-older DuckDB files are not compatible. To roll back a schema-changing upgrade,
-restore its pre-upgrade backup with the bot stopped and use the previous image.
+instance and one writable database.
+
+**Version 3 starts with a fresh database.** Its schema (version 3, stored in
+SQLite's `user_version`) is not migrated from earlier versions: point `DB_PATH`
+at a new file, or start with an empty `data/` directory. The bot refuses to open
+a database written by another schema version rather than guess.
 
 ### Building and checking the image locally
 
@@ -106,9 +106,11 @@ python3 scripts/docker-smoke.py divar-alert:deployment-check
 ```
 
 The Linux smoke test uses a local mock bot API, disposable data, and fake
-credentials. It checks Compose configuration, startup, embedded catalogs, CA
-certificates, legacy SQLite migration, persistence across container recreation,
-and graceful shutdown. It sends no real chat messages.
+credentials. It checks Compose configuration, Telegram and Bale startup,
+embedded catalogs, CA certificates, the fresh schema, persistence across
+container recreation, refusal of older databases, and graceful shutdown. It
+sends no real chat messages. Images record their version (the release tag or
+`sha-<commit>`), which the bot logs at startup.
 
 To run a local build yourself, use the same persistent database path:
 ```bash
@@ -116,6 +118,20 @@ docker run -d --name divar-alert-bot --env-file .env \
   -e DB_PATH=/root/app/data/divar-alert.db \
   -v "$PWD/data:/root/app/data" divar-alert:deployment-check
 ```
+
+### Project structure
+
+| Path | Contents |
+|---|---|
+| `main.go` | Wiring only: configuration, database, bots, shutdown. |
+| `config/` | Reads settings from the environment. |
+| `platform/` | The `Platform` type (`telegram`, `bale`) and `Chat`, a chat ID together with its platform. |
+| `app/` | The bot: command and button handlers, the conversational alert flow, the scheduler and scans, and delivery with AI commentary and map pins. Every message goes through the bot of the chat's platform. |
+| `db/` | SQLite storage: alerts, drafts, deliveries, and AI history, all keyed by platform and chat. |
+| `conversation/` | Turns a Persian request into a Divar search through AI-planned questions. |
+| `ai/` | OpenAI-compatible client for alert planning and listing evaluation. |
+| `divar/` | Divar search, listing details, filters, and the embedded city and category catalogs. |
+| `cmd/` | Tools that refresh the embedded catalogs. |
 
 ### Running Natively
 1. Clone the repository:
@@ -303,9 +319,9 @@ separate from the search server payload.
     - Provides a confirmed delete action for each alert.
 
 ### `/cancel`
-- Cancels the current setup or AI prompt operation and returns to the main menu.
+- Cancels the alert being set up, including an AI turn in progress, and returns to the main menu.
 
-The legacy `/alertSet` and `/alertList` commands remain supported.
+`/alertSet` and `/alertList` are aliases of `/alert_set` and `/alerts`.
 
 ---
 
@@ -322,6 +338,7 @@ The legacy `/alertSet` and `/alertList` commands remain supported.
     - Toggle AI analysis, start an alert fresh, or delete it using the inline buttons.
 4. **Receive Notifications**:
     - New conversational alerts initially send up to three current listings, then only newly appearing search matches.
+    - Listings with a location on Divar are followed by a map pin that replies to the listing; approximate locations show their radius on Telegram.
     - When AI is enabled, notifications include a Persian score, recommendation, and explanation. Low scores and unmet wishes never hide a listing. If AI or listing-detail extraction fails, the listing is sent without commentary.
     - Failed sends retry. Pagination and scan checkpoints persist across restarts.
 
@@ -329,15 +346,15 @@ The legacy `/alertSet` and `/alertList` commands remain supported.
 
 ## AI Evaluation Feature
 
-AI analysis is optional for each alert. When enabled, the bot uses OpenAI to analyze each new post against the prompt saved with that alert and the history of previous posts. Prompts can target any category, such as vehicles, electronics, jobs, or property.
+AI analysis is on for every new alert and can be turned off per alert from **My Alerts**. The bot asks the AI to judge each new listing against the request you wrote when creating the alert, plus any preferences Divar's filters could not express, and to compare it with earlier listings for the same alert. It works for any category, such as vehicles, electronics, jobs, or property.
 
 ### How It Works
 
-1. **Check AI State**: Disabled alerts skip OpenAI requests and detailed AI data extraction entirely.
-2. **Get Post Details**: For enabled alerts, the bot fetches the full post details.
+1. **Get Post Details**: The bot fetches the full post details, also used for the location pin.
+2. **Check AI State**: Alerts with AI turned off skip the AI request.
 3. **Extract Important Data**: The bot extracts general listing data. Rental price, location, and property fields remain available when present.
 4. **Load History**: The bot loads the recent history for the same alert.
-5. **AI Evaluation**: The bot sends the alert's analysis prompt, the new post, and its history to OpenAI.
+5. **AI Evaluation**: The bot sends the analysis goal built from your request, the new post, and its history to the AI.
 6. **Receive Score & Decision**: The AI returns commentary (never a delivery gate):
    - A score from 1-100
    - A short decision based on the alert's prompt
@@ -348,21 +365,19 @@ AI analysis is optional for each alert. When enabled, the bot uses OpenAI to ana
 
 ### History Storage
 
-Post history is stored in the SQLite database configured by `DB_PATH`. History is restored after restart and limited to the latest 50 ads per alert; each AI evaluation uses at most 20 previous ads. Deleting an alert soft-deletes its configuration and stops monitoring while preserving its stored data. The **Fresh Start** button clears AI history and scan state, and retires active delivery deduplication records without erasing them. Conversational alerts start again with up to three current listings; legacy curl alerts retain their existing fresh-start behavior.
+Post history is stored in the SQLite database configured by `DB_PATH`. History is restored after restart and limited to the latest 50 ads per alert; each AI evaluation uses at most 20 previous ads. Deleting an alert soft-deletes its configuration and stops monitoring while preserving its stored data. The **Fresh Start** button clears AI history and scan state, and retires active delivery deduplication records without erasing them. The alert starts again with up to three current listings.
 
-### Migrating From DuckDB
+### Delivery records
 
-Successful delivery records retain their row ID, alert ID, listing token, payload, and timestamp. Fresh Start marks old delivery records with `deleted_at`, allowing a resend to create a new audit row. Deleted alerts retain their owning chat ID, so delivery records remain attributable to users. No charging, quota enforcement, or AI-token accounting is implemented. These records preserve the current at-least-once delivery behavior, not an exactly-once billing ledger. Temporary conversation state and capped AI history still use physical cleanup.
-
-SQLite and DuckDB files are not interchangeable. Set `DB_PATH` to a new file such as `./data/divar-alert.db`; do not point it at the previous `db.badger` file. Keep the old file as a backup if you need its data for a separate one-time migration.
+Successful delivery records retain their row ID, alert ID, listing token, payload, and timestamp. Fresh Start marks old delivery records with `retired_at`, allowing a resend to create a new audit row. Deleted alerts retain their owning platform and chat ID, so delivery records remain attributable to users. No charging, quota enforcement, or AI-token accounting is implemented. These records preserve the current at-least-once delivery behavior, not an exactly-once billing ledger. Temporary conversation state and capped AI history still use physical cleanup.
 
 ### Conversation implementation
 
-`conversation.Service` owns the typed `AlertDraft` and runs catalog-grounded AI turns through `ai.PlanAlertTurn`. Draft JSON is stored in the existing SQLite processes table. Category/filter questions are capped at five per draft (edits do not reset the budget); city questions are separate. Confirmation atomically consumes the saved revision, preventing duplicate creation. `/start` resumes an unfinished draft and `/cancel` cancels even an in-flight interpretation.
+`conversation.Service` owns the typed `AlertDraft` and runs catalog-grounded AI turns through `ai.PlanAlertTurn`. Draft JSON is stored in the SQLite `drafts` table, keyed by platform and chat. Category/filter questions are capped at five per draft (edits do not reset the budget); city questions are separate. Confirmation atomically consumes the saved revision, preventing duplicate creation. `/start` resumes an unfinished draft and `/cancel` cancels even an in-flight interpretation.
 
 `divar.SearchWithQuery` uses a typed request, date sorting, disabled recommendations, and opaque pagination cursors. The scheduler allows up to four independent structured alert scans without overlapping scans of the same alert. A scan processes at most ten pages per scheduling pass, saving its cursor for continuation. External-service delays can extend an individual scan beyond the configured interval.
 
-Category and city snapshots are embedded in the binary; refresh them with the existing commands and rebuild to deploy updated snapshots. Dynamic filters and lazy brand/model options are fetched during interpretation, not written to disk. Additive SQLite migrations retain legacy curl alerts and in-progress legacy setup sessions. Runtime and conversation error messages are Persian; credentials and technical errors stay out of chat replies.
+Category and city snapshots are embedded in the binary; refresh them with the existing commands and rebuild to deploy updated snapshots. Dynamic filters and lazy brand/model options are fetched during interpretation, not written to disk. Runtime and conversation error messages are Persian; credentials and technical errors stay out of chat replies.
 
 Tests use mocked AI, Divar, and Telegram/Bale HTTP endpoints; no live chat messages are sent. Run `go test ./...` and `go test -race ./...` for the conversation, persistence, and watcher checks.
 
@@ -370,7 +385,7 @@ Tests use mocked AI, Divar, and Telegram/Bale HTTP endpoints; no live chat messa
 
 You can customize the AI behavior by:
 - Enabling or disabling AI independently for every alert
-- Setting a different analysis prompt for each alert
+- Writing extra preferences in your request; Divar-incompatible wishes are added to the AI's goal
 - Using a different OpenAI model (set `OPENAI_MODEL` in `.env`)
 - Using a compatible OpenAI API endpoint (set `OPENAI_BASE_URL` in `.env`)
 - The bot will continue to work without AI evaluation if OpenAI credentials are not provided
@@ -383,9 +398,8 @@ You can customize the AI behavior by:
 |---------------------|--------------------------------------------------|
 | `TELEGRAM_BOT_TOKEN`| Token of your Telegram bot. Set this, `BALE_BOT_TOKEN`, or both. |
 | `TELEGRAM_API_URL`  | (Optional) Telegram Bot API URL. Default: `https://api.telegram.org` |
-| `BALE_BOT_TOKEN`    | Token of your Bale bot. |
+| `BALE_BOT_TOKEN`    | Token of your Bale bot. Set this, `TELEGRAM_BOT_TOKEN`, or both. |
 | `BALE_API_URL`      | (Optional) Bale Bot API URL. Default: `https://tapi.bale.ai` |
-| `EXISTING_ALERTS_PLATFORM` | `bale` or `telegram`: the platform that created alerts saved by an earlier single-bot version. Needed only when both tokens are set and such alerts exist. |
 | `DIVAR_IMAGE_TAG`  | Required by Docker Compose: a published release tag or `sha-<full-commit>`. |
 | `DB_PATH`           | The path to the SQLite database file.            |
 | `POLL_INTERVAL_SECONDS` | Scheduler scan interval from 1 to 3600 seconds. Default: `1` |
@@ -399,7 +413,6 @@ You can customize the AI behavior by:
 ```env
 TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 BALE_BOT_TOKEN=654321:XYZ-abcdef1234567890
-EXISTING_ALERTS_PLATFORM=bale
 DB_PATH=./data/divar-alert.db
 POLL_INTERVAL_SECONDS=1
 
