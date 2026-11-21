@@ -15,7 +15,6 @@ import (
 	"github.com/mrmohebi/divar-alert/divar"
 )
 
-const ProcessKey = "NATURAL_ALERT"
 const MaxQuestions = 5
 
 type AlertDraft struct {

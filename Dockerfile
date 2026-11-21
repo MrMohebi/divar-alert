@@ -1,13 +1,16 @@
 FROM golang:1.25-alpine AS builder
+ARG VERSION=dev
 
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /divar-alert .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-X main.version=${VERSION}" -o /divar-alert .
 
 
 FROM alpine:3.24
+ARG VERSION=dev
+LABEL org.opencontainers.image.version="${VERSION}"
 LABEL org.opencontainers.image.source="https://github.com/MrMohebi/divar-alert"
 
 WORKDIR /root/app

@@ -46,24 +46,14 @@ func TestEvaluatePostUsesCustomAnalysisPrompt(t *testing.T) {
 	}
 }
 
-func TestEvaluatePostUsesRentalDefaultForLegacyAlert(t *testing.T) {
-	var received OpenAIRequest
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		_ = json.NewDecoder(r.Body).Decode(&received)
-		return jsonResponse(`{"choices":[{"message":{"content":"{\"score\":80,\"price_score\":85,\"location_score\":70,\"features_score\":75,\"decision\":\"مناسب اجاره\",\"explanation\":\"قیمت مناسبی دارد.\"}"}}]}`), nil
-	})}
+func TestEvaluatePostRequiresGoal(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
-	t.Setenv("OPENAI_BASE_URL", "https://example.test")
-
-	result, err := evaluatePost(context.Background(), client, map[string]string{"title": "home"}, nil, "")
-	if err != nil {
-		t.Fatalf("EvaluatePost() error = %v", err)
-	}
-	if result.PriceScore != 85 {
-		t.Fatalf("price score = %d", result.PriceScore)
-	}
-	if !strings.Contains(received.Messages[1].Content, DefaultAnalysisPrompt) {
-		t.Fatal("legacy rental prompt missing from request")
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("called the AI without a goal")
+		return nil, nil
+	})}
+	if _, err := evaluatePost(context.Background(), client, map[string]string{"title": "home"}, nil, " "); err == nil {
+		t.Fatal("evaluated without a goal")
 	}
 }
 

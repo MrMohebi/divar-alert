@@ -13,8 +13,6 @@ import (
 	"time"
 )
 
-const DefaultAnalysisPrompt = `Evaluate this as an Iranian home-rental listing. Compare its price with similar posts in the alert history. Base 70% of the score on price, 15% on location, and 15% on property features. Explain in Persian whether it is worth renting.`
-
 const maxHistoryPosts = 20
 
 const systemPrompt = `You analyze marketplace listings according to an alert owner's goal.
@@ -86,7 +84,7 @@ func evaluatePost(ctx context.Context, client httpDoer, newPost interface{}, his
 		model = "gpt-4o-mini"
 	}
 	if strings.TrimSpace(analysisPrompt) == "" {
-		analysisPrompt = DefaultAnalysisPrompt
+		return nil, errors.New("analysis goal is required")
 	}
 	if len(history) > maxHistoryPosts {
 		history = history[len(history)-maxHistoryPosts:]
@@ -169,9 +167,4 @@ func evaluatePost(ctx context.Context, client httpDoer, newPost interface{}, his
 	}
 
 	return &result, nil
-}
-
-// EvaluateRentalPost preserves the original rental-focused API for existing callers.
-func EvaluateRentalPost(newPost interface{}, history []interface{}) (*EvaluationResult, error) {
-	return EvaluatePost(context.Background(), newPost, history, DefaultAnalysisPrompt)
 }
