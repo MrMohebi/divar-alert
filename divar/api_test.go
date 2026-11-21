@@ -1,6 +1,9 @@
 package divar
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestParseCurlCommand(t *testing.T) {
 	t.Parallel()
@@ -70,5 +73,36 @@ func TestExtractImportantDataIncludesGenericAttributes(t *testing.T) {
 	}
 	if data.Attributes["price"] != "500000000" {
 		t.Fatalf("price attribute = %q", data.Attributes["price"])
+	}
+}
+
+func TestExtractImportantDataReadsExactAndApproximateLocations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		mapJSON  string
+		lat, lng float64
+		radius   float64
+	}{
+		{"exact", `{"type":"EXACT","exact_data":{"point":{"latitude":30.26,"longitude":57.03}}}`, 30.26, 57.03, 0},
+		{"approximate", `{"type":"FUZZY","fuzzy_data":{"point":{"latitude":30.29,"longitude":57.04},"radius":500}}`, 30.29, 57.04, 500},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var post PostDetailRes
+			raw := `{"sections":[{"section_name":"MAP","widgets":[{"widget_type":"MAP_ROW","data":{"location":` + tt.mapJSON + `}}]}]}`
+			if err := json.Unmarshal([]byte(raw), &post); err != nil {
+				t.Fatal(err)
+			}
+			got := ExtractImportantData(post).Location
+			if !got.HasPoint() || got.Latitude != tt.lat || got.Longitude != tt.lng || got.RadiusMeters != tt.radius {
+				t.Fatalf("location = %+v", got)
+			}
+		})
+	}
+	if (LocationInfo{}).HasPoint() {
+		t.Fatal("empty location reported a point")
 	}
 }

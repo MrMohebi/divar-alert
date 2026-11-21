@@ -72,7 +72,7 @@ func (db *DB) WithActiveAlert(alert Alert, fn func() error) error {
 	lock.Lock()
 	defer lock.Unlock()
 	var active bool
-	err := db.conn.QueryRow(`SELECT EXISTS(SELECT 1 FROM alerts WHERE id=? AND chat_id=? AND generation=? AND deleted_at IS NULL)`, alert.Id, alert.ChatId, alert.Generation).Scan(&active)
+	err := db.conn.QueryRow(`SELECT EXISTS(SELECT 1 FROM alerts WHERE id=? AND platform=? AND chat_id=? AND generation=? AND deleted_at IS NULL)`, alert.Id, alert.Platform, alert.ChatId, alert.Generation).Scan(&active)
 	if err != nil {
 		return err
 	}

@@ -206,17 +206,83 @@ func TestNotifierActuallySendsLowScoresAndDependencyFailures(t *testing.T) {
 				},
 				History:       func(int64) ([]interface{}, error) { return nil, nil },
 				AppendHistory: func(int64, interface{}) error { return nil },
-				Send: func(ctx context.Context, id int64, image, text string) error {
+				Send: func(ctx context.Context, platform string, id int64, image, text string) (int, error) {
 					sends++
 					if !strings.Contains(text, "https://divar.ir/v/abc") {
 						t.Fatal("missing post link")
 					}
-					return nil
+					return 1, nil
 				},
 			}
 			if err := notifier.Notify(context.Background(), db.Alert{AIEnabled: true, AnalysisPrompt: "برای خانواده مناسب باشد"}, divar.Listing{Token: "abc", Title: "خودرو"}); err != nil || sends != 1 {
 				t.Fatalf("AI gated notification: sends=%d err=%v", sends, err)
 			}
 		})
+	}
+}
+
+func TestNotifierSendsLocationAfterListingAndToleratesFailure(t *testing.T) {
+	mapSection := func(location string) divar.PostDetailRes {
+		var post divar.PostDetailRes
+		raw := `{"webengage":{"token":"abc"},"sections":[{"section_name":"MAP","widgets":[{"widget_type":"MAP_ROW","data":{"location":` + location + `}}]}]}`
+		if err := json.Unmarshal([]byte(raw), &post); err != nil {
+			t.Fatal(err)
+		}
+		return post
+	}
+	tests := []struct {
+		name        string
+		post        divar.PostDetailRes
+		locationErr error
+		wantPins    int
+	}{
+		{"approximate", mapSection(`{"type":"FUZZY","fuzzy_data":{"point":{"latitude":30.29,"longitude":57.04},"radius":500}}`), nil, 1},
+		{"no location", divar.PostDetailRes{}, nil, 0},
+		{"pin fails", mapSection(`{"type":"EXACT","exact_data":{"point":{"latitude":30.26,"longitude":57.03}}}`), errors.New("offline"), 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var events []string
+			var pinned divar.LocationInfo
+			notifier := listingNotifier{
+				GetPost: func(context.Context, string) (divar.PostDetailRes, error) { return tt.post, nil },
+				Send: func(ctx context.Context, platform string, id int64, image, text string) (int, error) {
+					events = append(events, "listing:"+platform)
+					return 77, nil
+				},
+				SendLocation: func(ctx context.Context, platform string, id int64, replyTo int, location divar.LocationInfo) error {
+					events = append(events, fmt.Sprintf("pin:%s:%d", platform, replyTo))
+					pinned = location
+					return tt.locationErr
+				},
+			}
+			// AI is off here, so details are still fetched for the location alone.
+			err := notifier.Notify(context.Background(), db.Alert{Platform: "telegram", ChatId: 42}, divar.Listing{Token: "abc"})
+			if err != nil {
+				t.Fatalf("Notify() error = %v", err)
+			}
+			want := []string{"listing:telegram"}
+			if tt.wantPins == 1 {
+				want = append(want, "pin:telegram:77")
+			}
+			if strings.Join(events, ",") != strings.Join(want, ",") {
+				t.Fatalf("events = %v, want %v", events, want)
+			}
+			if tt.name == "approximate" && pinned.RadiusMeters != 500 {
+				t.Fatalf("pinned = %+v", pinned)
+			}
+		})
+	}
+}
+
+func TestAnalysisGoal(t *testing.T) {
+	conversational := analysisGoal(db.Alert{SearchQuery: `{"city_ids":["13"]}`, OriginalPrompt: "آپارتمان در کرمان", AnalysisPrompt: "پارکینگ داشته باشد"})
+	for _, part := range []string{"آپارتمان در کرمان", "پارکینگ داشته باشد", "Persian"} {
+		if !strings.Contains(conversational, part) {
+			t.Fatalf("goal %q lacks %q", conversational, part)
+		}
+	}
+	if goal := analysisGoal(db.Alert{AnalysisPrompt: "custom"}); goal != "custom" {
+		t.Fatalf("link-based alert goal = %q", goal)
 	}
 }

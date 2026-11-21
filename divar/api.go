@@ -482,6 +482,13 @@ type WidgetData struct {
 type Location struct {
 	Type      string     `json:"type"`
 	ExactData *ExactData `json:"exact_data"`
+	FuzzyData *FuzzyData `json:"fuzzy_data"`
+}
+
+// FuzzyData is an approximate location: the listing is within Radius meters of Point.
+type FuzzyData struct {
+	Point  Point   `json:"point"`
+	Radius float64 `json:"radius"`
 }
 
 type ExactData struct {
@@ -847,7 +854,14 @@ type RentalPropertyDetails struct {
 type LocationInfo struct {
 	Latitude  float64 `json:"lat"`
 	Longitude float64 `json:"lng"`
-	MapImage  string  `json:"map_image"`
+	// RadiusMeters is set for approximate locations; zero means exact.
+	RadiusMeters float64 `json:"radius_meters,omitempty"`
+	MapImage     string  `json:"map_image"`
+}
+
+// HasPoint reports whether the listing published coordinates.
+func (l LocationInfo) HasPoint() bool {
+	return l.Latitude != 0 || l.Longitude != 0
 }
 
 type FeatureInfo struct {
@@ -986,9 +1000,13 @@ func ExtractImportantData(post PostDetailRes) PostImportantData {
 			// Extract location
 			for _, widget := range section.Widgets {
 				if widget.WidgetType == "MAP_ROW" && widget.Data.Location != nil {
-					if widget.Data.Location.ExactData != nil {
-						data.Location.Latitude = widget.Data.Location.ExactData.Point.Latitude
-						data.Location.Longitude = widget.Data.Location.ExactData.Point.Longitude
+					if exact := widget.Data.Location.ExactData; exact != nil {
+						data.Location.Latitude = exact.Point.Latitude
+						data.Location.Longitude = exact.Point.Longitude
+					} else if fuzzy := widget.Data.Location.FuzzyData; fuzzy != nil {
+						data.Location.Latitude = fuzzy.Point.Latitude
+						data.Location.Longitude = fuzzy.Point.Longitude
+						data.Location.RadiusMeters = fuzzy.Radius
 					}
 					if widget.Data.ImageURL != "" {
 						data.Location.MapImage = widget.Data.ImageURL
