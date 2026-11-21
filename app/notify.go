@@ -124,27 +124,49 @@ func (a *App) botFor(chat platform.Chat) (*bot.Bot, error) {
 }
 
 // sendListing sends the listing as a photo with caption, falling back to
-// text when there is no image or the photo is rejected.
+// text when there is no image or the photo is rejected. Text longer than the
+// caption or message limit continues in follow-up messages, so nothing (in
+// particular the listing link at the end) is cut off. It returns the ID of
+// the first message sent.
 func (a *App) sendListing(ctx context.Context, chat platform.Chat, imageURL, text string) (int, error) {
 	b, err := a.botFor(chat)
 	if err != nil {
 		return 0, err
 	}
 	if imageURL != "" {
+		caption := splitText(text, maxCaptionLength)
 		message, err := b.SendPhoto(ctx, &bot.SendPhotoParams{
 			ChatID:  chat.ID,
 			Photo:   &models.InputFileString{Data: imageURL},
-			Caption: truncate(text, maxCaptionLength),
+			Caption: caption[0],
 		})
 		if err == nil {
+			rest := strings.Join(caption[1:], "\n")
+			if rest != "" {
+				if _, err := a.sendTexts(ctx, b, chat, rest); err != nil {
+					return message.ID, err
+				}
+			}
 			return message.ID, nil
 		}
 	}
-	message, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chat.ID, Text: truncate(text, maxMessageLength)})
-	if err != nil {
-		return 0, err
+	return a.sendTexts(ctx, b, chat, text)
+}
+
+// sendTexts sends text as one or more messages within the message limit and
+// returns the first message's ID.
+func (a *App) sendTexts(ctx context.Context, b *bot.Bot, chat platform.Chat, text string) (int, error) {
+	firstID := 0
+	for _, part := range splitText(text, maxMessageLength) {
+		message, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chat.ID, Text: part})
+		if err != nil {
+			return firstID, err
+		}
+		if firstID == 0 {
+			firstID = message.ID
+		}
 	}
-	return message.ID, nil
+	return firstID, nil
 }
 
 // sendLocation sends a map pin replying to the listing. An approximate
@@ -167,10 +189,38 @@ func (a *App) sendLocation(ctx context.Context, chat platform.Chat, replyTo int,
 	return err
 }
 
-func truncate(text string, limit int) string {
-	runes := []rune(text)
-	if len(runes) <= limit {
-		return text
+// splitText cuts text into parts of at most limit characters, preferring to
+// break at a line break, then at a space, so words and links stay whole. It
+// always returns at least one part.
+func splitText(text string, limit int) []string {
+	runes := []rune(strings.TrimSpace(text))
+	var parts []string
+	for len(runes) > limit {
+		cut := lastBreak(runes[:limit+1], '\n', limit/2)
+		if cut < 0 {
+			cut = lastBreak(runes[:limit+1], ' ', limit/2)
+		}
+		next := cut + 1
+		if cut < 0 {
+			cut, next = limit, limit
+		}
+		if part := strings.TrimSpace(string(runes[:cut])); part != "" {
+			parts = append(parts, part)
+		}
+		runes = []rune(strings.TrimLeft(string(runes[next:]), " \n"))
 	}
-	return string(runes[:limit-1]) + "…"
+	if len(runes) > 0 || len(parts) == 0 {
+		parts = append(parts, string(runes))
+	}
+	return parts
+}
+
+// lastBreak returns the index of the last sep in runes at or after from, or -1.
+func lastBreak(runes []rune, sep rune, from int) int {
+	for i := len(runes) - 1; i >= from; i-- {
+		if runes[i] == sep {
+			return i
+		}
+	}
+	return -1
 }

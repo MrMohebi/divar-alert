@@ -177,12 +177,11 @@ func (a *App) draftView(d *conversation.AlertDraft) (string, *models.InlineKeybo
 
 func (a *App) sendDraft(ctx context.Context, b *bot.Bot, chat platform.Chat, d *conversation.AlertDraft) {
 	text, keyboard := a.draftView(d)
-	runes := []rune(text)
-	for len(runes) > 4096 {
-		a.send(ctx, b, chat, string(runes[:4096]), nil)
-		runes = runes[4096:]
+	parts := splitText(text, maxMessageLength)
+	for _, part := range parts[:len(parts)-1] {
+		a.send(ctx, b, chat, part, nil)
 	}
-	a.send(ctx, b, chat, string(runes), keyboard)
+	a.send(ctx, b, chat, parts[len(parts)-1], keyboard)
 }
 
 // handleDraftButton handles the buttons under a draft message. Buttons carry
