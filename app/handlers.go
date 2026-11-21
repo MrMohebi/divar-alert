@@ -288,9 +288,15 @@ func confirmKeyboard(yes, yesData, cancelData string) *models.InlineKeyboardMark
 	}}}
 }
 
-// send writes a message to the chat; failures are logged.
-func (a *App) send(ctx context.Context, b *bot.Bot, chat platform.Chat, text string, markup models.ReplyMarkup) {
-	if _, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chat.ID, Text: text, ReplyMarkup: markup}); err != nil {
+// send writes a message to the chat; failures are logged. A nil keyboard
+// leaves reply_markup unset: wrapping a nil pointer in the ReplyMarkup
+// interface would send "null", which Telegram rejects.
+func (a *App) send(ctx context.Context, b *bot.Bot, chat platform.Chat, text string, keyboard *models.InlineKeyboardMarkup) {
+	params := &bot.SendMessageParams{ChatID: chat.ID, Text: text}
+	if keyboard != nil {
+		params.ReplyMarkup = keyboard
+	}
+	if _, err := b.SendMessage(ctx, params); err != nil {
 		a.log.Errorw("Failed to send message", "chat", chat, "error", err)
 	}
 }

@@ -72,8 +72,15 @@ func newFakePlatform(t *testing.T) *fakePlatform {
 		if text == "" {
 			text = r.FormValue("caption")
 		}
-		fake.record(method, text)
 		w.Header().Set("Content-Type", "application/json")
+		if r.FormValue("reply_markup") == "null" {
+			// Telegram rejects a null reply_markup (Bale tolerates it), so a
+			// rejected request is not recorded as delivered.
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"Bad Request: object expected as reply markup"}`)
+			return
+		}
+		fake.record(method, text)
 		switch method {
 		case "sendMessage", "sendPhoto", "sendLocation", "editMessageText":
 			fake.mu.Lock()
