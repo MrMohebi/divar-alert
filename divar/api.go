@@ -1,14 +1,12 @@
 package divar
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -17,270 +15,6 @@ import (
 type APIPath struct {
 	SearchList string
 	PostDetail string
-}
-
-type SearchRes struct {
-	ListTopWidgets []struct {
-		WidgetType string `json:"widget_type"`
-		Data       struct {
-			Type  string `json:"@type"`
-			Title string `json:"title"`
-			Icon  struct {
-				ImageURLDark  string `json:"image_url_dark"`
-				ImageURLLight string `json:"image_url_light"`
-				IconName      string `json:"icon_name"`
-				IconColor     string `json:"icon_color"`
-			} `json:"icon"`
-			Items []struct {
-				Title  string `json:"title"`
-				Action struct {
-					Type    string `json:"type"`
-					Payload struct {
-						Type       string `json:"@type"`
-						SearchData struct {
-							FormData struct {
-								Data struct {
-									Category struct {
-										Str struct {
-											Value string `json:"value"`
-										} `json:"str"`
-									} `json:"category"`
-									Sort struct {
-										Str struct {
-											Value string `json:"value"`
-										} `json:"str"`
-									} `json:"sort"`
-									Price struct {
-										NumberRange struct {
-											Minimum string `json:"minimum"`
-											Maximum string `json:"maximum"`
-										} `json:"number_range"`
-									} `json:"price"`
-								} `json:"data"`
-							} `json:"form_data"`
-						} `json:"search_data"`
-						SourceView    string `json:"source_view"`
-						SourceViewStr string `json:"source_view_str"`
-					} `json:"payload"`
-				} `json:"action"`
-			} `json:"items"`
-		} `json:"data"`
-	} `json:"list_top_widgets"`
-	ListWidgets []struct {
-		WidgetType string `json:"widget_type"`
-		Data       struct {
-			Type   string `json:"@type"`
-			Title  string `json:"title"`
-			Action struct {
-				Type    string `json:"type"`
-				Payload struct {
-					Type    string `json:"@type"`
-					Token   string `json:"token"`
-					WebInfo struct {
-						Title       string `json:"title"`
-						CityPersian string `json:"city_persian"`
-					} `json:"web_info"`
-				} `json:"payload"`
-			} `json:"action"`
-			ImageURL              string `json:"image_url"`
-			BottomDescriptionText string `json:"bottom_description_text"`
-			RedText               string `json:"red_text"`
-			MiddleDescriptionText string `json:"middle_description_text"`
-			HasDivider            bool   `json:"has_divider"`
-			ImageCount            int    `json:"image_count"`
-			TopDescriptionText    string `json:"top_description_text"`
-			ImageTopLeftTag       struct {
-				Text string `json:"text"`
-				Icon struct {
-					ImageURLDark  string `json:"image_url_dark"`
-					ImageURLLight string `json:"image_url_light"`
-					IconName      string `json:"icon_name"`
-					IconColor     string `json:"icon_color"`
-				} `json:"icon"`
-			} `json:"image_top_left_tag"`
-			Token                    string `json:"token"`
-			ShouldIndicateSeenStatus bool   `json:"should_indicate_seen_status"`
-		} `json:"data"`
-		ActionLog struct {
-			ServerSideInfo struct {
-				Info struct {
-					Type       string `json:"@type"`
-					PostToken  string `json:"post_token"`
-					Index      int    `json:"index"`
-					PostType   string `json:"post_type"`
-					ListType   string `json:"list_type"`
-					SourcePage string `json:"source_page"`
-					ExtraData  struct {
-						Type string `json:"@type"`
-						Jli  struct {
-							Sort struct {
-								Value string `json:"value"`
-							} `json:"sort"`
-							Cities []string `json:"cities"`
-							Price  struct {
-								Max int `json:"max"`
-								Min int `json:"min"`
-							} `json:"price"`
-							Category struct {
-								Value string `json:"value"`
-							} `json:"category"`
-						} `json:"jli"`
-						SearchUID  string `json:"search_uid"`
-						SearchData struct {
-							FormDataJSON      string   `json:"form_data_json"`
-							ServerPayloadJSON string   `json:"server_payload_json"`
-							Cities            []string `json:"cities"`
-							QueryInputType    string   `json:"query_input_type"`
-						} `json:"search_data"`
-					} `json:"extra_data"`
-					SortDate time.Time `json:"sort_date"`
-				} `json:"info"`
-				ItemType struct {
-					Type string `json:"type"`
-				} `json:"item_type"`
-			} `json:"server_side_info"`
-			Enabled bool `json:"enabled"`
-		} `json:"action_log"`
-	} `json:"list_widgets"`
-	SearchData struct {
-		FormData struct {
-			Data struct {
-				Category struct {
-					Str struct {
-						Value string `json:"value"`
-					} `json:"str"`
-				} `json:"category"`
-				Price struct {
-					NumberRange struct {
-						Minimum string `json:"minimum"`
-						Maximum string `json:"maximum"`
-					} `json:"number_range"`
-				} `json:"price"`
-			} `json:"data"`
-		} `json:"form_data"`
-		ServerPayload struct {
-			Type               string `json:"@type"`
-			AdditionalFormData struct {
-				Data struct {
-					Sort struct {
-						Str struct {
-							Value string `json:"value"`
-						} `json:"str"`
-					} `json:"sort"`
-				} `json:"data"`
-			} `json:"additional_form_data"`
-		} `json:"server_payload"`
-	} `json:"search_data"`
-	ActionLog struct {
-		ServerSideInfo struct {
-			Info struct {
-				Type       string   `json:"@type"`
-				Cities     []string `json:"cities"`
-				CurrentTab string   `json:"current_tab"`
-				SearchData struct {
-					FormDataJSON      string   `json:"form_data_json"`
-					ServerPayloadJSON string   `json:"server_payload_json"`
-					Cities            []string `json:"cities"`
-					QueryInputType    string   `json:"query_input_type"`
-				} `json:"search_data"`
-				Tokens      []string `json:"tokens"`
-				HasNextPage bool     `json:"has_next_page"`
-				Pelle       struct {
-					Elastic struct {
-						Tokens         []string `json:"tokens"`
-						TotalHitsCount int      `json:"total_hits_count"`
-						Documents      []struct {
-							Token string `json:"token"`
-							Type  string `json:"type"`
-						} `json:"documents"`
-					} `json:"elastic"`
-				} `json:"pelle"`
-				LastPostDateEpoch string `json:"last_post_date_epoch"`
-				SearchID          string `json:"search_id"`
-				SearchUID         string `json:"search_uid"`
-				SourceView        string `json:"source_view"`
-				PostsMetadata     []struct {
-					Token    string `json:"token"`
-					SortDate string `json:"sort_date"`
-					Source   string `json:"source"`
-				} `json:"posts_metadata"`
-				Jli struct {
-					Sort struct {
-						Value string `json:"value"`
-					} `json:"sort"`
-					Cities []string `json:"cities"`
-					Price  struct {
-						Min int `json:"min"`
-						Max int `json:"max"`
-					} `json:"price"`
-					Category struct {
-						Value string `json:"value"`
-					} `json:"category"`
-				} `json:"jli"`
-				SearchLayer string `json:"search_layer"`
-				AdsBanner   struct {
-					AuctionIds []string `json:"auction_ids"`
-					Ads        []struct {
-						AdInstanceID string `json:"ad_instance_id"`
-						Index        int    `json:"index"`
-						Offset       int    `json:"offset"`
-					} `json:"ads"`
-				} `json:"ads_banner"`
-			} `json:"info"`
-			ItemType struct {
-				Type string `json:"type"`
-			} `json:"item_type"`
-		} `json:"server_side_info"`
-		Enabled bool `json:"enabled"`
-	} `json:"action_log"`
-	SearchBar struct {
-		Bookmark struct {
-			ToggleActionLog struct {
-				ServerSideInfo struct {
-					ItemType struct {
-						Type string `json:"type"`
-					} `json:"item_type"`
-				} `json:"server_side_info"`
-				Enabled bool `json:"enabled"`
-			} `json:"toggle_action_log"`
-			Enabled bool `json:"enabled"`
-		} `json:"bookmark"`
-	} `json:"search_bar"`
-	Pagination struct {
-		HasNextPage bool `json:"has_next_page"`
-		Data        struct {
-			Type                   string    `json:"@type"`
-			LastPostDate           time.Time `json:"last_post_date"`
-			Page                   int       `json:"page"`
-			LayerPage              int       `json:"layer_page"`
-			SearchUID              string    `json:"search_uid"`
-			CumulativeWidgetsCount int       `json:"cumulative_widgets_count"`
-		} `json:"data"`
-		IsFirstPage bool `json:"is_first_page"`
-	} `json:"pagination"`
-	SearchID   string `json:"search_id"`
-	SeoDetails struct {
-		Title          string `json:"title"`
-		Description    string `json:"description"`
-		Headline       string `json:"headline"`
-		RobotsMetadata struct {
-			Follow bool `json:"follow"`
-		} `json:"robots_metadata"`
-		BreadCrumb []struct {
-			Name       string `json:"name"`
-			SearchData struct {
-				FormData struct {
-					Data struct {
-						Category struct {
-							Str struct {
-								Value string `json:"value"`
-							} `json:"str"`
-						} `json:"category"`
-					} `json:"data"`
-				} `json:"form_data"`
-			} `json:"search_data,omitempty"`
-		} `json:"bread_crumb"`
-	} `json:"seo_details"`
 }
 
 // PostDetailRes represents the response structure for a single post detail
@@ -481,6 +215,13 @@ type WidgetData struct {
 type Location struct {
 	Type      string     `json:"type"`
 	ExactData *ExactData `json:"exact_data"`
+	FuzzyData *FuzzyData `json:"fuzzy_data"`
+}
+
+// FuzzyData is an approximate location: the listing is within Radius meters of Point.
+type FuzzyData struct {
+	Point  Point   `json:"point"`
+	Radius float64 `json:"radius"`
 }
 
 type ExactData struct {
@@ -608,142 +349,7 @@ var APIPaths = APIPath{
 	PostDetail: "/v8/posts-v2/web",
 }
 
-// parseCurlCommand extracts URL, headers, and body from a curl command string
-func parseCurlCommand(curlString string) (url string, headers map[string]string, body string, err error) {
-	headers = make(map[string]string)
-
-	// Normalize the curl command: remove line continuations and extra whitespace
-	curlString = strings.ReplaceAll(curlString, "\\\n", " ")
-	curlString = strings.ReplaceAll(curlString, "\\\r\n", " ")
-	curlString = regexp.MustCompile(`\s+`).ReplaceAllString(curlString, " ")
-	curlString = strings.TrimSpace(curlString)
-
-	// Extract URL - look for URL after 'curl' and before any flags
-	urlRegex := regexp.MustCompile(`https://[^'"\s]+`)
-	urlMatches := urlRegex.FindStringSubmatch(curlString)
-	if len(urlMatches) == 0 {
-		return "", nil, "", errors.New("failed to extract URL from curl command")
-	}
-	url = urlMatches[0]
-
-	// Extract headers (-H or --header)
-	// This regex handles headers more robustly by capturing everything between quotes
-	headerRegex := regexp.MustCompile(`(?:-H|--header)\s+['"]([^'"]+)['"]`)
-	headerMatches := headerRegex.FindAllStringSubmatch(curlString, -1)
-	for _, match := range headerMatches {
-		if len(match) >= 2 {
-			// Split on first colon to separate header name and value
-			headerContent := match[1]
-			colonIdx := strings.Index(headerContent, ":")
-			if colonIdx > 0 {
-				headerName := strings.TrimSpace(headerContent[:colonIdx])
-				headerValue := strings.TrimSpace(headerContent[colonIdx+1:])
-				headers[headerName] = headerValue
-			}
-		}
-	}
-
-	// Extract body data - handle both single and double quotes
-	// Try to find data flags and extract the quoted content that follows
-	dataPatterns := []string{
-		`--data-raw\s+'([^']*(?:''[^']*)*)'`, // Single quotes (handle escaped quotes)
-		`--data-raw\s+"([^"]*(?:""[^"]*)*)"`, // Double quotes (handle escaped quotes)
-		`--data\s+'([^']*(?:''[^']*)*)'`,     // --data with single quotes
-		`--data\s+"([^"]*(?:""[^"]*)*)"`,     // --data with double quotes
-		`-d\s+'([^']*(?:''[^']*)*)'`,         // -d with single quotes
-		`-d\s+"([^"]*(?:""[^']*)*)"`,         // -d with double quotes
-	}
-
-	for _, pattern := range dataPatterns {
-		dataRegex := regexp.MustCompile(pattern)
-		dataMatches := dataRegex.FindStringSubmatch(curlString)
-		if len(dataMatches) >= 2 {
-			body = dataMatches[1]
-			// Unescape doubled quotes if present
-			body = strings.ReplaceAll(body, "''", "'")
-			body = strings.ReplaceAll(body, `""`, `"`)
-			break
-		}
-	}
-
-	return url, headers, body, nil
-}
-
-// ValidateSearchCommand ensures a user-supplied curl command targets only Divar's search API.
-func ValidateSearchCommand(curlString string) error {
-	rawURL, _, _, err := parseCurlCommand(curlString)
-	if err != nil {
-		return err
-	}
-
-	parsedURL, err := url.Parse(rawURL)
-	if err != nil {
-		return fmt.Errorf("invalid search URL: %w", err)
-	}
-	if parsedURL.Scheme != "https" || parsedURL.Hostname() != "api.divar.ir" || parsedURL.Path != APIPaths.SearchList {
-		return errors.New("curl command must target the Divar search API over HTTPS")
-	}
-	return nil
-}
-
-func Search(curlString string) (SearchRes, error) {
-	if err := ValidateSearchCommand(curlString); err != nil {
-		return SearchRes{}, err
-	}
-
-	// Parse curl command instead of executing it
-	url, headers, body, err := parseCurlCommand(curlString)
-	if err != nil {
-		return SearchRes{}, fmt.Errorf("failed to parse curl command: %w", err)
-	}
-
-	// Create HTTP request
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	var req *http.Request
-	if body != "" {
-		req, err = http.NewRequest("POST", url, bytes.NewBufferString(body))
-	} else {
-		req, err = http.NewRequest("GET", url, nil)
-	}
-	if err != nil {
-		return SearchRes{}, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Add headers
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-
-	// Execute request
-	resp, err := client.Do(req)
-	if err != nil {
-		return SearchRes{}, fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return SearchRes{}, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	// Read response
-	output, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return SearchRes{}, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	var data SearchRes
-	if err := json.Unmarshal(output, &data); err != nil {
-		return SearchRes{}, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-	return data, nil
-}
-
-// GetPost fetches a single post detail by its token
-// Note: This returns the raw API response. The structure varies by listing type (rental, sale, etc.)
-func GetPost(postToken string) (PostDetailRes, error) {
+func GetPostContext(ctx context.Context, postToken string) (PostDetailRes, error) {
 	postToken = strings.TrimSpace(postToken)
 	if postToken == "" {
 		return PostDetailRes{}, errors.New("post token is required")
@@ -764,7 +370,7 @@ func GetPost(postToken string) (PostDetailRes, error) {
 	}
 
 	// Create request
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return PostDetailRes{}, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -820,9 +426,6 @@ type PostImportantData struct {
 	URL             string                `json:"url"`
 }
 
-// RentalPostImportantData is retained for compatibility with existing history and callers.
-type RentalPostImportantData = PostImportantData
-
 // RentalPriceInfo contains pricing information for rental listings (deposit + monthly rent)
 type RentalPriceInfo struct {
 	Deposit      string `json:"deposit"`
@@ -842,7 +445,14 @@ type RentalPropertyDetails struct {
 type LocationInfo struct {
 	Latitude  float64 `json:"lat"`
 	Longitude float64 `json:"lng"`
-	MapImage  string  `json:"map_image"`
+	// RadiusMeters is set for approximate locations; zero means exact.
+	RadiusMeters float64 `json:"radius_meters,omitempty"`
+	MapImage     string  `json:"map_image"`
+}
+
+// HasPoint reports whether the listing published coordinates.
+func (l LocationInfo) HasPoint() bool {
+	return l.Latitude != 0 || l.Longitude != 0
 }
 
 type FeatureInfo struct {
@@ -981,9 +591,13 @@ func ExtractImportantData(post PostDetailRes) PostImportantData {
 			// Extract location
 			for _, widget := range section.Widgets {
 				if widget.WidgetType == "MAP_ROW" && widget.Data.Location != nil {
-					if widget.Data.Location.ExactData != nil {
-						data.Location.Latitude = widget.Data.Location.ExactData.Point.Latitude
-						data.Location.Longitude = widget.Data.Location.ExactData.Point.Longitude
+					if exact := widget.Data.Location.ExactData; exact != nil {
+						data.Location.Latitude = exact.Point.Latitude
+						data.Location.Longitude = exact.Point.Longitude
+					} else if fuzzy := widget.Data.Location.FuzzyData; fuzzy != nil {
+						data.Location.Latitude = fuzzy.Point.Latitude
+						data.Location.Longitude = fuzzy.Point.Longitude
+						data.Location.RadiusMeters = fuzzy.Radius
 					}
 					if widget.Data.ImageURL != "" {
 						data.Location.MapImage = widget.Data.ImageURL
@@ -1017,9 +631,4 @@ func ExtractImportantData(post PostDetailRes) PostImportantData {
 	}
 
 	return data
-}
-
-// ExtractRentalImportantData preserves the original rental-focused API.
-func ExtractRentalImportantData(post PostDetailRes) RentalPostImportantData {
-	return ExtractImportantData(post)
 }
