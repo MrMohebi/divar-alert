@@ -209,3 +209,46 @@ func TestDelayedScanCannotDeliverAfterDeleteOrReset(t *testing.T) {
 		})
 	}
 }
+
+func TestSplitTextKeepsEverythingWithinTheLimit(t *testing.T) {
+	line := strings.Repeat("کلمه ", 30) // 150 runes
+	text := strings.Repeat(line+"\n", 20) + "https://divar.ir/v/abc"
+	for _, limit := range []int{100, 1024, 4096} {
+		parts := splitText(text, limit)
+		for _, part := range parts {
+			if n := len([]rune(part)); n > limit || n == 0 {
+				t.Fatalf("limit %d: part of %d runes", limit, n)
+			}
+		}
+		if !strings.HasSuffix(parts[len(parts)-1], "https://divar.ir/v/abc") {
+			t.Fatalf("limit %d: link lost or broken: %q", limit, parts[len(parts)-1])
+		}
+		if got, want := strings.Join(strings.Fields(strings.Join(parts, " ")), " "), strings.Join(strings.Fields(text), " "); got != want {
+			t.Fatalf("limit %d: text changed", limit)
+		}
+	}
+	if parts := splitText(strings.Repeat("a", 250), 100); len(parts) != 3 || parts[2] != strings.Repeat("a", 50) {
+		t.Fatalf("unbreakable text parts = %q", parts)
+	}
+	if parts := splitText("short", 100); len(parts) != 1 || parts[0] != "short" {
+		t.Fatalf("short text parts = %q", parts)
+	}
+}
+
+// A listing too long for a photo caption continues in follow-up messages, so
+// its link still arrives.
+func TestLongListingContinuesAfterThePhoto(t *testing.T) {
+	ta := newTestApp(t)
+	text := strings.Repeat(strings.Repeat("توضیح ", 20)+"\n", 30) + "https://divar.ir/v/abc"
+	id, err := ta.sendListing(context.Background(), telegramChat, "https://example.com/a.jpg", text)
+	if err != nil || id != 1 {
+		t.Fatalf("id=%d err=%v", id, err)
+	}
+	photos, messages := ta.telegram.texts("sendPhoto"), ta.telegram.texts("sendMessage")
+	if len(photos) != 1 || len([]rune(photos[0])) > maxCaptionLength || len(messages) == 0 {
+		t.Fatalf("photos=%d messages=%d", len(photos), len(messages))
+	}
+	if !strings.HasSuffix(messages[len(messages)-1], "https://divar.ir/v/abc") {
+		t.Fatal("listing link missing from the follow-up message")
+	}
+}
