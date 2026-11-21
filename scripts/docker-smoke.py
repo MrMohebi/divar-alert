@@ -80,6 +80,17 @@ def stop_bot(name):
     docker("rm", name)
 
 
+def reclaim(image, data):
+    """Hand files the container created as root back to this user.
+
+    On Linux the database in the bind mount is owned by the container's root
+    user, so the host could read but not write it. chown comes from the image
+    under test, so no other image is needed.
+    """
+    docker("run", "--rm", "--entrypoint", "chown", "-v", f"{data}:/data", image,
+           "-R", f"{os.getuid()}:{os.getgid()}", "/data")
+
+
 def main():
     image = sys.argv[1] if len(sys.argv) > 1 else "divar-alert:deployment-check"
     metadata = json.loads(docker("image", "inspect", image))[0]
@@ -131,6 +142,7 @@ def main():
                 for platform in ("telegram", "bale"):
                     assert f'"msg":"Bot connected","platform":"{platform}"' in logs, logs
                 stop_bot(name)
+                reclaim(image, data)
                 with sqlite3.connect(path) as conn:
                     assert conn.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
                     assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
