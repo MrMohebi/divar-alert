@@ -70,3 +70,28 @@ func jsonResponse(body string) *http.Response {
 		Body:       io.NopCloser(strings.NewReader(body)),
 	}
 }
+
+func TestEvaluatePostReadsBulletPoints(t *testing.T) {
+	content, _ := json.Marshal(map[string]any{
+		"score":       75,
+		"decision":    "**ارزش تماس دارد**",
+		"strengths":   []string{"- اجاره‌ی واقعی **۱۹ میلیون** است", "  ", "parking", "• **پارکینگ**\nدارد"},
+		"concerns":    []string{"سال ساخت مشخص نیست", "دو", "سه", "چهار", "پنج", "شش"},
+		"explanation": "در مجموع **مناسب** است.",
+	})
+	body, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": string(content)}}}})
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(string(body)), nil
+	})}
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	result, err := evaluatePost(context.Background(), client, map[string]string{"title": "home"}, nil, "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(result.Strengths, "|") != "اجاره‌ی واقعی **۱۹ میلیون** است|**پارکینگ** دارد" {
+		t.Fatalf("strengths = %q", result.Strengths)
+	}
+	if len(result.Concerns) != maxEvaluationPoints || result.Concerns[0] != "سال ساخت مشخص نیست" {
+		t.Fatalf("concerns = %q", result.Concerns)
+	}
+}

@@ -61,3 +61,38 @@ func TestExtractImportantDataReadsExactAndApproximateLocations(t *testing.T) {
 		t.Fatal("empty location reported a point")
 	}
 }
+
+func TestExtractImportantDataReadsRentTerms(t *testing.T) {
+	t.Parallel()
+
+	slider := PostDetailRes{
+		Webengage: Webengage{Credit: 7500000256, Rent: 1000000},
+		Sections: []Section{{
+			SectionName: "LIST_DATA",
+			Widgets: []Widget{{
+				WidgetType: "RENT_SLIDER",
+				Data: WidgetData{
+					Credit: &Credit{Value: "7500000000", TransformedValue: "6000000000"},
+					Rent:   &Credit{Value: "1000000", TransformedValue: "45000000"},
+				},
+			}},
+		}},
+	}
+	if got := ExtractImportantData(slider).Price; got != (RentalPriceInfo{Deposit: "7500000000", Rent: "1000000", TransDeposit: "6000000000", TransRent: "45000000"}) {
+		t.Fatalf("slider price = %+v", got)
+	}
+
+	rows := PostDetailRes{
+		Webengage: Webengage{Credit: 2200000000},
+		Sections: []Section{{
+			SectionName: "LIST_DATA",
+			Widgets: []Widget{
+				{WidgetType: "UNEXPANDABLE_ROW", Data: WidgetData{Title: "ودیعه", Value: "‏۲,۲۰۰,۰۰۰,۰۰۰ تومان"}},
+				{WidgetType: "UNEXPANDABLE_ROW", Data: WidgetData{Title: "اجارهٔ ماهانه", Value: "رایگان"}},
+			},
+		}},
+	}
+	if got := ExtractImportantData(rows).Price; got.Deposit != "‏۲,۲۰۰,۰۰۰,۰۰۰ تومان" || got.Rent != "رایگان" {
+		t.Fatalf("row price = %+v", got)
+	}
+}

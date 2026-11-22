@@ -10,6 +10,7 @@ This project is a bot designed to monitor your filters on [Divar](https://divar.
 - Answer up to five dynamic clarification questions, review the summary, and confirm.
 - Monitor every 60 seconds by default, with up to three current listings sent initially.
 - **AI analysis** of every listing against your own request, for any Divar category, through any OpenAI-compatible API.
+- **Real monthly rent**: each rental shows its real monthly cost in today's money before the analysis. The figure combines the deposit and the rent under inflation, as in [actual-rent-calculator](https://github.com/MrMohebi/actual-rent-calculator). Convertible listings also show the converted terms. Set the yearly inflation with `RENT_INFLATION_PERCENT` (default 80).
 - **Location pins**: listings with a location on Divar are followed by a map pin; approximate locations show their radius.
 - Serves Telegram and Bale bots together from one process and one database; each chat belongs to its platform.
 - Persistent storage using SQLite, including alerts, bot state, delivered posts, and AI history.
@@ -30,6 +31,7 @@ This project is a bot designed to monitor your filters on [Divar](https://divar.
   BALE_BOT_TOKEN=<Your Bale bot token; optional>
   DB_PATH=<Path to the SQLite database file>
   POLL_INTERVAL_SECONDS=<Seconds between scheduler scans; default 1>
+  RENT_INFLATION_PERCENT=<Yearly inflation for real monthly rent; default 80>
   ```
 
 ### Deploying a published Docker image (Linux x86-64)

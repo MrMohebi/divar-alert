@@ -25,6 +25,7 @@ func TestLoad(t *testing.T) {
 		env     map[string]string
 		bots    []Bot
 		poll    time.Duration
+		rent    float64
 		wantErr bool
 	}{
 		{
@@ -35,16 +36,19 @@ func TestLoad(t *testing.T) {
 				{Platform: platform.Bale, Token: "bl", APIURL: "https://tapi.bale.ai"},
 			},
 			poll: time.Second,
+			rent: 80,
 		},
 		{
 			name: "Bale only with custom URL and poll interval",
-			env:  with(map[string]string{"BALE_BOT_TOKEN": "bl", "BALE_API_URL": "http://mock/", "POLL_INTERVAL_SECONDS": "5"}),
+			env:  with(map[string]string{"BALE_BOT_TOKEN": "bl", "BALE_API_URL": "http://mock/", "POLL_INTERVAL_SECONDS": "5", "RENT_INFLATION_PERCENT": "45.5"}),
 			bots: []Bot{{Platform: platform.Bale, Token: "bl", APIURL: "http://mock"}},
 			poll: 5 * time.Second,
+			rent: 45.5,
 		},
 		{name: "no token", env: with(nil), wantErr: true},
 		{name: "no database path", env: map[string]string{"TELEGRAM_BOT_TOKEN": "tg"}, wantErr: true},
 		{name: "bad poll interval", env: with(map[string]string{"TELEGRAM_BOT_TOKEN": "tg", "POLL_INTERVAL_SECONDS": "0"}), wantErr: true},
+		{name: "bad rent inflation", env: with(map[string]string{"TELEGRAM_BOT_TOKEN": "tg", "RENT_INFLATION_PERCENT": "-5"}), wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -58,7 +62,7 @@ func TestLoad(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(config.Bots, tt.bots) || config.PollInterval != tt.poll || config.DBPath != "./data/bot.db" {
+			if !reflect.DeepEqual(config.Bots, tt.bots) || config.PollInterval != tt.poll || config.RentInflation != tt.rent || config.DBPath != "./data/bot.db" {
 				t.Fatalf("config=%+v", config)
 			}
 		})

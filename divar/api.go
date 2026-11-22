@@ -432,6 +432,9 @@ type RentalPriceInfo struct {
 	Rent         string `json:"rent"`
 	TransDeposit string `json:"trans_deposit"`
 	TransRent    string `json:"trans_rent"`
+	// RealMonthlyRent is the real monthly cost in today's toman, combining
+	// deposit and rent under inflation; zero when not a rental.
+	RealMonthlyRent int64 `json:"real_monthly_rent,omitempty"`
 }
 
 // RentalPropertyDetails contains property-specific details for rental listings
@@ -538,6 +541,17 @@ func ExtractImportantData(post PostDetailRes) PostImportantData {
 		case "LIST_DATA":
 			// Extract property details, price, floor, and features
 			for i, widget := range section.Widgets {
+				// Rent and deposit come in UNEXPANDABLE_ROW or RENT_SLIDER
+				// widgets; a slider's transformed values are the converted terms.
+				if widget.Data.Credit != nil {
+					data.Price.Deposit = widget.Data.Credit.Value
+					data.Price.TransDeposit = widget.Data.Credit.TransformedValue
+				}
+				if widget.Data.Rent != nil {
+					data.Price.Rent = widget.Data.Rent.Value
+					data.Price.TransRent = widget.Data.Rent.TransformedValue
+				}
+
 				switch widget.WidgetType {
 				case "GROUP_INFO_ROW":
 					// Property details (area, build year, rooms)
@@ -554,16 +568,6 @@ func ExtractImportantData(post PostDetailRes) PostImportantData {
 					}
 
 				case "UNEXPANDABLE_ROW":
-					// Check for price information
-					if widget.Data.Credit != nil {
-						data.Price.Deposit = widget.Data.Credit.Value
-						data.Price.TransDeposit = widget.Data.Credit.TransformedValue
-					}
-					if widget.Data.Rent != nil {
-						data.Price.Rent = widget.Data.Rent.Value
-						data.Price.TransRent = widget.Data.Rent.TransformedValue
-					}
-
 					// Check for floor information
 					if widget.Data.Title == "طبقه" && widget.Data.Value != "" {
 						data.PropertyDetails.Floor = widget.Data.Value
@@ -622,7 +626,22 @@ func ExtractImportantData(post PostDetailRes) PostImportantData {
 		}
 	}
 
-	// Fallback: If price data was not found in widgets, try to extract from Webengage
+	// Fixed (non-convertible) rentals show their terms as plain rows.
+	for title, value := range data.Attributes {
+		switch NormalizePersian(title) {
+		case "ودیعه":
+			if data.Price.Deposit == "" {
+				data.Price.Deposit = value
+			}
+		case "اجاره ماهانه":
+			if data.Price.Rent == "" {
+				data.Price.Rent = value
+			}
+		}
+	}
+
+	// Fallback: If price data was not found in widgets, try to extract from
+	// Webengage, whose amounts can be slightly off (float precision).
 	if data.Price.Deposit == "" && post.Webengage.Credit > 0 {
 		data.Price.Deposit = fmt.Sprintf("%d", post.Webengage.Credit)
 	}

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/go-telegram/bot"
@@ -32,6 +33,8 @@ type notifier struct {
 	Send         func(ctx context.Context, chat platform.Chat, imageURL, text string) (int, error)
 	SendLocation func(ctx context.Context, chat platform.Chat, replyTo int, location divar.LocationInfo) error
 	Warn         func(msg string, keysAndValues ...any)
+	// RentInflation is the yearly inflation, in percent, used to price rentals.
+	RentInflation float64
 }
 
 func (a *App) notifier() notifier {
@@ -43,6 +46,7 @@ func (a *App) notifier() notifier {
 		Send:          a.sendListing,
 		SendLocation:  a.sendLocation,
 		Warn:          a.log.Warnw,
+		RentInflation: a.rentInflation,
 	}
 }
 
@@ -52,14 +56,20 @@ func (n notifier) warn(msg string, keysAndValues ...any) {
 	}
 }
 
-// Notify sends the listing, with AI commentary when enabled, then its
-// location as a map pin replying to it.
+// Notify sends the listing, with a rental's real monthly rent and AI
+// commentary when enabled, then its location as a map pin replying to it.
 func (n notifier) Notify(ctx context.Context, alert db.Alert, post divar.Listing) error {
 	var evaluation *ai.EvaluationResult
 	var details divar.PostImportantData
 	raw, err := n.GetPost(ctx, post.Token)
 	if err == nil {
 		details = divar.ExtractImportantData(raw)
+	}
+	quote := quoteRent(details, post, n.RentInflation)
+	if quote != nil {
+		details.Price.RealMonthlyRent = int64(math.Round(quote.Real))
+	}
+	if err == nil {
 		if alert.AIEnabled {
 			history, _ := n.History(alert.ID)
 			evaluation, err = n.Evaluate(ctx, details, history, analysisGoal(alert))
@@ -69,7 +79,7 @@ func (n notifier) Notify(ctx context.Context, alert db.Alert, post divar.Listing
 		evaluation = nil
 		n.warn("Listing details or commentary unavailable", "alert_id", alert.ID, "error", err)
 	}
-	messageID, err := n.Send(ctx, alert.Chat, post.ImageURL, listingText(alert, post, evaluation))
+	messageID, err := n.Send(ctx, alert.Chat, post.ImageURL, listingText(alert, post, quote, evaluation))
 	if err != nil {
 		return err
 	}
@@ -88,7 +98,7 @@ func (n notifier) Notify(ctx context.Context, alert db.Alert, post divar.Listing
 
 // analysisGoal asks the AI to judge a listing against the owner's request.
 func analysisGoal(alert db.Alert) string {
-	goal := "Judge how well this listing matches the owner's request and whether its price is good compared with similar earlier listings for this alert. Point out anything the owner should check before contacting the seller. Write the explanation briefly in Persian."
+	goal := "Judge how well this listing matches the owner's request and whether its price is good compared with similar earlier listings for this alert. Point out anything the owner should check before contacting the seller. Write everything briefly in Persian."
 	if request := strings.TrimSpace(alert.OriginalPrompt); request != "" {
 		goal += "\n\nOwner's request:\n" + request
 	}
@@ -98,20 +108,48 @@ func analysisGoal(alert db.Alert) string {
 	return goal
 }
 
-func listingText(alert db.Alert, post divar.Listing, evaluation *ai.EvaluationResult) string {
+// listingText is the listing message. Bold spans are marked, not rendered;
+// sendListing renders them for the chat's platform.
+func listingText(alert db.Alert, post divar.Listing, quote *rentQuote, evaluation *ai.EvaluationResult) string {
 	var text strings.Builder
-	fmt.Fprintf(&text, "آگهی تازه برای «%s»\n\n%s\n", alert.Title, post.Title)
+	fmt.Fprintf(&text, "آگهی تازه برای «%s»\n\n%s\n", plainText(alert.Title), bold(post.Title))
 	for _, line := range []string{post.TopDescriptionText, post.MiddleDescriptionText, post.BottomDescriptionText} {
 		if line != "" {
-			text.WriteString(line + "\n")
+			text.WriteString(boldValue(line) + "\n")
 		}
 	}
+	if quote != nil {
+		text.WriteString("\n" + quote.text())
+	}
 	if evaluation != nil {
-		fmt.Fprintf(&text, "\nتحلیل آگهی\nامتیاز: %d از ۱۰۰\nپیشنهاد: %s\nتوضیح: %s\n", evaluation.Score, evaluation.Decision, evaluation.Explanation)
+		text.WriteString("\n" + evaluationText(evaluation))
 	} else if alert.AIEnabled {
 		text.WriteString("\nتحلیل فعلاً در دسترس نیست؛ این آگهی را بدون امتیاز می‌فرستم.\n")
 	}
 	fmt.Fprintf(&text, "\nhttps://divar.ir/v/%s", post.Token)
+	return text.String()
+}
+
+// evaluationText shows the AI analysis: the verdict, then strengths and
+// concerns as bullet points, then a short summary.
+func evaluationText(e *ai.EvaluationResult) string {
+	var text strings.Builder
+	fmt.Fprintf(&text, "%s\nامتیاز: %s\nپیشنهاد: %s\n", bold("تحلیل آگهی"), bold(fmt.Sprintf("%d از ۱۰۰", e.Score)), richText(e.Decision))
+	for _, list := range []struct {
+		title  string
+		points []string
+	}{{"✅ نقاط قوت", e.Strengths}, {"⚠️ نکات قابل توجه", e.Concerns}} {
+		if len(list.points) == 0 {
+			continue
+		}
+		text.WriteString("\n" + bold(list.title) + "\n")
+		for _, point := range list.points {
+			text.WriteString("• " + richText(point) + "\n")
+		}
+	}
+	if summary := richText(e.Explanation); summary != "" {
+		text.WriteString("\n" + summary + "\n")
+	}
 	return text.String()
 }
 
@@ -134,11 +172,13 @@ func (a *App) sendListing(ctx context.Context, chat platform.Chat, imageURL, tex
 		return 0, err
 	}
 	if imageURL != "" {
-		caption := splitText(text, maxCaptionLength)
+		caption := balanceBold(splitText(text, maxCaptionLength))
+		body, mode := render(chat.Platform, caption[0])
 		message, err := b.SendPhoto(ctx, &bot.SendPhotoParams{
-			ChatID:  chat.ID,
-			Photo:   &models.InputFileString{Data: imageURL},
-			Caption: caption[0],
+			ChatID:    chat.ID,
+			Photo:     &models.InputFileString{Data: imageURL},
+			Caption:   body,
+			ParseMode: mode,
 		})
 		if err == nil {
 			rest := strings.Join(caption[1:], "\n")
@@ -153,12 +193,17 @@ func (a *App) sendListing(ctx context.Context, chat platform.Chat, imageURL, tex
 	return a.sendTexts(ctx, b, chat, text)
 }
 
-// sendTexts sends text as one or more messages within the message limit and
-// returns the first message's ID.
+// sendTexts sends marked text as one or more formatted messages within the
+// message limit and returns the first message's ID. A part whose formatting
+// is rejected is resent as plain text, so formatting never loses a listing.
 func (a *App) sendTexts(ctx context.Context, b *bot.Bot, chat platform.Chat, text string) (int, error) {
 	firstID := 0
-	for _, part := range splitText(text, maxMessageLength) {
-		message, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chat.ID, Text: part})
+	for _, part := range balanceBold(splitText(text, maxMessageLength)) {
+		body, mode := render(chat.Platform, part)
+		message, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chat.ID, Text: body, ParseMode: mode})
+		if err != nil && mode != "" {
+			message, err = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chat.ID, Text: plainText(part)})
+		}
 		if err != nil {
 			return firstID, err
 		}
