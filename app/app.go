@@ -27,15 +27,19 @@ type Options struct {
 	Conversation *conversation.Service
 	Logger       *zap.SugaredLogger
 	PollInterval time.Duration
+	// RentInflation is the yearly inflation, in percent, used to show each
+	// rental's real monthly rent.
+	RentInflation float64
 }
 
 // App is the bot. Every chat is addressed as a platform.Chat, and every
 // message to a chat goes through the bot of that chat's platform.
 type App struct {
-	store        *db.DB
-	conv         *conversation.Service
-	log          *zap.SugaredLogger
-	pollInterval time.Duration
+	store         *db.DB
+	conv          *conversation.Service
+	log           *zap.SugaredLogger
+	pollInterval  time.Duration
+	rentInflation float64
 
 	// Filled by AddBot before Run and read-only afterwards.
 	bots      map[platform.Platform]*bot.Bot
@@ -66,15 +70,16 @@ func New(opts Options) *App {
 		interval = time.Second
 	}
 	return &App{
-		store:        opts.Store,
-		conv:         opts.Conversation,
-		log:          logger,
-		pollInterval: interval,
-		bots:         map[platform.Platform]*bot.Bot{},
-		platforms:    map[*bot.Bot]platform.Platform{},
-		pollSlots:    make(chan struct{}, maxConcurrentPolls),
-		search:       divar.SearchWithQuery,
-		getPost:      divar.GetPostContext,
+		store:         opts.Store,
+		conv:          opts.Conversation,
+		log:           logger,
+		pollInterval:  interval,
+		rentInflation: opts.RentInflation,
+		bots:          map[platform.Platform]*bot.Bot{},
+		platforms:     map[*bot.Bot]platform.Platform{},
+		pollSlots:     make(chan struct{}, maxConcurrentPolls),
+		search:        divar.SearchWithQuery,
+		getPost:       divar.GetPostContext,
 		evaluate: func(ctx context.Context, post any, history []any, goal string) (*ai.EvaluationResult, error) {
 			return ai.EvaluatePost(ctx, post, history, goal)
 		},

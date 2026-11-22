@@ -33,7 +33,7 @@ func TestListingTextKeepsListingWhateverTheCommentary(t *testing.T) {
 		{Score: 1, Decision: "پیشنهاد نمی‌شود", Explanation: "شرایط موردنظر را ندارد."},
 		nil,
 	} {
-		text := listingText(alert, post, evaluation)
+		text := listingText(alert, post, nil, evaluation)
 		if !strings.Contains(text, "https://divar.ir/v/abc") || !strings.Contains(text, "خودرو") {
 			t.Fatal("commentary removed the listing")
 		}
@@ -145,7 +145,7 @@ func TestDeliveryUsesTheAlertsPlatform(t *testing.T) {
 	if err := ta.notifier().Notify(context.Background(), alert, divar.Listing{Token: "abc", Title: "خانه"}); err != nil {
 		t.Fatal(err)
 	}
-	if texts := ta.bale.texts("sendMessage"); len(texts) != 1 || !strings.Contains(texts[0], "امتیاز: 80") {
+	if texts := ta.bale.texts("sendMessage"); len(texts) != 1 || !strings.Contains(texts[0], "امتیاز: *80 از ۱۰۰*") {
 		t.Fatalf("bale messages = %q", texts)
 	}
 	if len(ta.bale.texts("sendLocation")) != 1 || len(ta.telegram.calls) != 0 {

@@ -55,7 +55,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	bot := app.New(app.Options{Store: store, Conversation: conv, Logger: log, PollInterval: cfg.PollInterval})
+	bot := app.New(app.Options{Store: store, Conversation: conv, Logger: log, PollInterval: cfg.PollInterval, RentInflation: cfg.RentInflation})
 	for _, b := range cfg.Bots {
 		if err := bot.AddBot(ctx, b); err != nil {
 			log.Fatalw("Failed to create bot", "platform", b.Platform, "error", err)
